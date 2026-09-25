@@ -7905,6 +7905,9 @@ export default {
     iconThemeBlackDescriptionMac: "Use the black logo in the app; Dock uses a black plate, menu bar follows the system.",
     showTrayIcon: "Show tray/menu bar icon",
     showTrayIconDescription: "When disabled, no icon is shown, but closing the window still hides DBX in the background as before.",
+    appLock: "Windows Hello",
+    appLockDescription: "Windows Hello checks the Windows user, does not encrypt the database, and does not stop the dbx CLI. A standalone MCP process is a separate trust boundary and is not gated by this lock.",
+    appLockUnavailable: "Windows Hello is unavailable.",
     quitOnClose: "Quit when closing window",
     quitOnCloseDescription: "When enabled, clicking the close button exits DBX completely instead of hiding it to the tray. You can change this later in Appearance settings.",
     closeActionPromptTitle: "Close window",
@@ -11147,6 +11150,12 @@ export default {
     compact: "Compact Cells",
     titleLabel: "Title (optional)",
     titlePlaceholder: "e.g. Query result",
+  },
+  appLock: {
+    title: "Unlock DBX to continue",
+    retry: "Retry",
+    quit: "Quit",
+    unavailable: "Windows Hello is unavailable. Retry or quit.",
   },
   migration: {
     eyebrow: "First launch after upgrade",

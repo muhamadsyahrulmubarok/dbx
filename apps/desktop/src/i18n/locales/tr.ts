@@ -7139,6 +7139,9 @@ export default withEnglishFallback({
     iconThemeBlackDescriptionMac: "Uygulamada siyah logoyu kullan; Dock siyah bir plaka kullanır, menü çubuğu sistemi izler.",
     showTrayIcon: "Tepsi/menü çubuğu simgesini göster",
     showTrayIconDescription: "Kapatıldığında simge gösterilmez, ancak pencereyi kapatmak yine de eskisi gibi DBX'i arka planda gizler.",
+    appLock: "Windows Hello",
+    appLockDescription: "Windows Hello Windows kullanıcısını doğrular, veritabanını şifrelemez ve dbx CLI'yi durdurmaz. Bağımsız bir MCP işlemi ayrı bir güven sınırıdır ve bu kilit tarafından kapsanmaz.",
+    appLockUnavailable: "Windows Hello kullanılamıyor.",
     quitOnClose: "Pencere kapatılınca çık",
     quitOnCloseDescription: "Etkinleştirildiğinde kapatma düğmesine tıklamak DBX'i tepsiye gizlemek yerine tümüyle kapatır. Bunu daha sonra Görünüm ayarlarından değiştirebilirsiniz.",
     closeActionPromptTitle: "Pencereyi kapat",
@@ -10284,6 +10287,12 @@ export default withEnglishFallback({
     compact: "Sıkışık Hücreler",
     titleLabel: "Başlık (isteğe bağlı)",
     titlePlaceholder: "örn. Sorgu sonucu",
+  },
+  appLock: {
+    title: "Devam etmek için DBX kilidini açın",
+    retry: "Yeniden dene",
+    quit: "Çık",
+    unavailable: "Windows Hello kullanılamıyor. Yeniden deneyin veya çıkın.",
   },
   migration: {
     eyebrow: "Güncelleme sonrası ilk açılış",

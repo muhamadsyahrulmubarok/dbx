@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   migrationStart: vi.fn(),
   migrationRetry: vi.fn(),
   migrationCleanupBackups: vi.fn(),
+  appLockStatus: vi.fn(),
+  appLockVerify: vi.fn(),
+  requestAppClose: vi.fn(),
 }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.desktop }));
 vi.mock("@/lib/backend/api", () => mocks);
@@ -39,6 +42,9 @@ beforeEach(() => {
   mocks.desktop.mockReturnValue(true);
   mocks.migrationStatus.mockResolvedValue(readyStatus);
   mocks.reloadLocale.mockResolvedValue(undefined);
+  mocks.appLockStatus.mockResolvedValue({ enabled: false, locked: false });
+  mocks.appLockVerify.mockResolvedValue("verified");
+  mocks.requestAppClose.mockResolvedValue(undefined);
   businessReady = deferred<void>();
   root = document.createElement("div");
   document.body.append(root);
@@ -195,6 +201,75 @@ describe("startup boundary", () => {
     expect(root.textContent).toContain("startup.loadFailed");
     expect(root.textContent).not.toContain("private module URL");
     expect(root.querySelector("button")).not.toBeNull();
+  });
+
+  it("does not import the business app while the native lock is held", async () => {
+    mocks.appLockStatus.mockResolvedValue({ enabled: true, locked: true });
+    mocks.appLockVerify.mockResolvedValue("canceled");
+    await mountGate();
+    await vi.waitFor(() => expect(root.querySelector("[data-app-lock]")).not.toBeNull());
+    expect(mocks.appImported).not.toHaveBeenCalled();
+    expect(mocks.migrationStatus).not.toHaveBeenCalled();
+    expect(mocks.appLockVerify).toHaveBeenCalledTimes(1);
+    expect(root.querySelector("[data-app-lock-retry]")).not.toBeNull();
+    expect(root.querySelector("[data-app-lock-quit]")).not.toBeNull();
+  });
+
+  it("imports the app after verification succeeds", async () => {
+    mocks.appLockStatus.mockResolvedValue({ enabled: true, locked: true });
+    mocks.appLockVerify.mockResolvedValue("verified");
+    mocks.appLockStatus.mockResolvedValueOnce({ enabled: true, locked: true }).mockResolvedValueOnce({ enabled: true, locked: false });
+    await mountGate();
+    await vi.waitFor(() => expect(mocks.appImported).toHaveBeenCalledTimes(1));
+    expect(mocks.appLockVerify).toHaveBeenCalledTimes(1);
+    expect(mocks.appLockStatus).toHaveBeenCalledTimes(2);
+    expect(mocks.migrationStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries verification after cancel and still does not enter migration", async () => {
+    mocks.appLockStatus.mockResolvedValue({ enabled: true, locked: true });
+    mocks.appLockVerify.mockResolvedValue("canceled");
+    await mountGate();
+    await vi.waitFor(() => expect(root.querySelector("[data-app-lock-retry]")).not.toBeNull());
+    expect(mocks.appLockVerify).toHaveBeenCalledTimes(1);
+    (root.querySelector("[data-app-lock-retry]") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(mocks.appLockVerify).toHaveBeenCalledTimes(2));
+    expect(mocks.appImported).not.toHaveBeenCalled();
+    expect(mocks.migrationStatus).not.toHaveBeenCalled();
+  });
+
+  it("stays on the lock panel when verification is unavailable", async () => {
+    mocks.appLockStatus.mockResolvedValue({ enabled: true, locked: true });
+    mocks.appLockVerify.mockResolvedValue("unavailable");
+    await mountGate();
+    await vi.waitFor(() => expect(root.querySelector("[data-app-lock]")).not.toBeNull());
+    expect(root.textContent).toContain("appLock.unavailable");
+    expect(mocks.appImported).not.toHaveBeenCalled();
+    expect(mocks.migrationStatus).not.toHaveBeenCalled();
+  });
+
+  it("quits from the lock panel through the desktop close command", async () => {
+    mocks.appLockStatus.mockResolvedValue({ enabled: true, locked: true });
+    mocks.appLockVerify.mockResolvedValue("canceled");
+    await mountGate();
+    await vi.waitFor(() => expect(root.querySelector("[data-app-lock-quit]")).not.toBeNull());
+    (root.querySelector("[data-app-lock-quit]") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(mocks.requestAppClose).toHaveBeenCalledTimes(1));
+    expect(mocks.appImported).not.toHaveBeenCalled();
+    expect(mocks.migrationStatus).not.toHaveBeenCalled();
+  });
+
+  it("shows a failed quit on the lock panel", async () => {
+    mocks.appLockStatus.mockResolvedValue({ enabled: true, locked: true });
+    mocks.appLockVerify.mockResolvedValue("canceled");
+    mocks.requestAppClose.mockRejectedValue(new Error("APP_LOCK_REQUIRED"));
+    await mountGate();
+    await vi.waitFor(() => expect(root.querySelector("[data-app-lock-quit]")).not.toBeNull());
+    (root.querySelector("[data-app-lock-quit]") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(root.textContent).toContain("APP_LOCK_REQUIRED"));
+    expect(root.querySelector("[data-app-lock]")).not.toBeNull();
+    expect(mocks.appImported).not.toHaveBeenCalled();
+    expect(mocks.migrationStatus).not.toHaveBeenCalled();
   });
 
   it("cancels pending authentication when the gate unmounts", async () => {

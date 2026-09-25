@@ -1,4 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { nextLockEnabled } from "@/lib/startup/appLockSettings";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
@@ -971,6 +973,43 @@ export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
 
 export async function requestAppClose(): Promise<void> {
   return invoke("request_app_close_from_window_controls");
+}
+
+export interface AppLockStatus {
+  enabled: boolean;
+  locked: boolean;
+}
+
+export async function appLockStatus(): Promise<AppLockStatus> {
+  if (!isTauriRuntime()) return { enabled: false, locked: false };
+  return invoke<AppLockStatus>("app_lock_status");
+}
+
+export async function appLockVerify(): Promise<"verified" | "canceled" | "unavailable"> {
+  const result = await invoke<{ outcome: "verified" | "canceled" | "unavailable" }>("app_lock_verify");
+  return result.outcome;
+}
+
+export async function enableAppLock(): Promise<"enabled" | "canceled" | "unavailable"> {
+  const availability = await invoke<{ available: boolean }>("app_lock_availability");
+  const outcome = await appLockVerify();
+  const decision = nextLockEnabled({ available: availability.available, outcome });
+  if (decision === "enable") {
+    try {
+      await invoke("app_lock_enable");
+    } catch (error) {
+      const message = typeof error === "string" ? error : error instanceof Error ? error.message : "";
+      if (message.includes("APP_LOCK_UNAVAILABLE")) return "canceled";
+      throw error;
+    }
+    return "enabled";
+  }
+  if (decision === "keep") return "canceled";
+  return "unavailable";
+}
+
+export async function disableAppLock(): Promise<void> {
+  await invoke("app_lock_disable");
 }
 
 export interface DriverStoreMigrationResult {

@@ -7242,6 +7242,9 @@ export default withEnglishFallback({
     iconThemeBlackDescriptionMac: "アプリ内は黒いロゴ、Dockは黒い背景、メニューバーはシステムに従います。",
     showTrayIcon: "トレイ/メニューバーアイコンを表示",
     showTrayIconDescription: "無効時はアイコンが表示されませんが、ウィンドウを閉じると従来通りDBXはバックグラウンドに隠れます。",
+    appLock: "Windows Hello",
+    appLockDescription: "Windows Hello は Windows ユーザーを確認します。データベースは暗号化せず、dbx CLI も停止しません。スタンドアロンの MCP プロセスは別の信頼境界であり、このロックの対象外です。",
+    appLockUnavailable: "Windows Hello は利用できません。",
     quitOnClose: "ウィンドウを閉じるときに終了",
     quitOnCloseDescription: "有効にすると、閉じるボタンでトレイに隠すのではなく、DBXを完全に終了します。",
     closeActionPromptTitle: "ウィンドウを閉じる",
@@ -10596,6 +10599,12 @@ export default withEnglishFallback({
     compact: "コンパクトセル",
     titleLabel: "タイトル（任意）",
     titlePlaceholder: "例：クエリ結果",
+  },
+  appLock: {
+    title: "続けるには DBX のロックを解除してください",
+    retry: "再試行",
+    quit: "終了",
+    unavailable: "Windows Hello を利用できません。再試行するか終了してください。",
   },
   migration: {
     eyebrow: "アップグレード後の初回起動",

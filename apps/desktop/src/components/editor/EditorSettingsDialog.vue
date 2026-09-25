@@ -142,7 +142,10 @@ import {
   forgetWebdavSyncSecretsPassphrase,
   forgetWebdavSavedPassword,
   getAppSupportInfo,
+  appLockStatus,
   checkBackgroundImage,
+  disableAppLock,
+  enableAppLock,
   clearBackgroundImage,
   saveBackgroundImage,
   loadMaxAgentTurns,
@@ -2901,6 +2904,52 @@ async function pickCustomSkillRoot() {
 const activeSettingsTab = ref("appearance");
 const settingsContentScrollRef = ref<HTMLElement | null>(null);
 const isWeb = !isTauriRuntime();
+const showWindowsHelloAppLock = !isWeb && isWindows();
+const appLockEnabled = ref(false);
+const appLockBusy = ref(false);
+
+function appLockErrorText(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
+  return String(error);
+}
+
+async function refreshAppLockSetting() {
+  if (!showWindowsHelloAppLock) return;
+  try {
+    appLockEnabled.value = (await appLockStatus()).enabled;
+  } catch {
+    appLockEnabled.value = false;
+  }
+}
+
+async function onAppLockToggle(checked: boolean | "indeterminate") {
+  if (appLockBusy.value) return;
+  appLockBusy.value = true;
+  const enable = checked === true;
+  try {
+    if (enable) {
+      const result = await enableAppLock();
+      appLockEnabled.value = result === "enabled";
+      if (result === "unavailable") toast(t("settings.appLockUnavailable"));
+      return;
+    }
+    try {
+      await disableAppLock();
+      appLockEnabled.value = false;
+    } catch (error) {
+      appLockEnabled.value = true;
+      if (!appLockErrorText(error).includes("APP_LOCK_REQUIRED")) toast(appLockErrorText(error));
+    }
+  } catch (error) {
+    appLockEnabled.value = false;
+    if (appLockErrorText(error).includes("APP_LOCK_UNAVAILABLE")) return;
+    toast(appLockErrorText(error));
+  } finally {
+    appLockBusy.value = false;
+  }
+}
 const appSupportInfo = ref<AppSupportInfo | null>(null);
 const appSupportInfoLoading = ref(false);
 const appSupportInfoError = ref("");
@@ -4457,6 +4506,7 @@ watch(
       await settingsStore.initAiConfigs();
       await settingsStore.initDesktopSettings();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
+      await refreshAppLockSetting();
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
@@ -7019,6 +7069,16 @@ onUnmounted(() => {
                   </p>
                 </div>
                 <Switch id="show-tray-icon" v-model="editShowTrayIcon" />
+              </div>
+
+              <div v-if="showWindowsHelloAppLock" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="app-lock-enabled">{{ t("settings.appLock") }}</Label>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.appLockDescription") }}
+                  </p>
+                </div>
+                <Switch id="app-lock-enabled" :model-value="appLockEnabled" :disabled="appLockBusy" @update:model-value="onAppLockToggle" />
               </div>
 
               <div v-if="!isWeb" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

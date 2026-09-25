@@ -7257,6 +7257,9 @@ export default withEnglishFallback({
     iconThemeBlackDescriptionMac: "Tətbiqdə qara loqodan istifadə et; Dock qara lövhədən istifadə edir, menyu zolağı isə sistemə uyğunlaşır.",
     showTrayIcon: "Sistem treyi/menyu zolağı ikonunu göstər",
     showTrayIconDescription: "Deaktiv olduqda ikon göstərilmir, lakin pəncərəni bağlamaq DBX-i əvvəlki kimi arxa planda gizlədir.",
+    appLock: "Windows Hello",
+    appLockDescription: "Windows Hello Windows istifadəçisini yoxlayır, verilənlər bazasını şifrələmir və dbx CLI-ni dayandırmır. Müstəqil MCP prosesi ayrı etibar sərhədidir və bu kilid ona tətbiq olunmur.",
+    appLockUnavailable: "Windows Hello əlçatan deyil.",
     quitOnClose: "Pəncərə bağlandıqda çıx",
     quitOnCloseDescription: "Aktiv olduqda bağlama düyməsinə klikləmək DBX-i sistem treyində gizlətmək əvəzinə tamamilə bağlayır. Bunu daha sonra Görünüş parametrlərində dəyişə bilərsiniz.",
     closeActionPromptTitle: "Pəncərəni bağla",
@@ -10403,6 +10406,12 @@ export default withEnglishFallback({
     compact: "Xanaları yığcamlaşdır",
     titleLabel: "Başlıq (istəyə bağlı)",
     titlePlaceholder: "Məsələn, sorğu nəticəsi",
+  },
+  appLock: {
+    title: "Davam etmək üçün DBX kilidini açın",
+    retry: "Yenidən cəhd et",
+    quit: "Çıx",
+    unavailable: "Windows Hello əlçatan deyil. Yenidən cəhd edin və ya çıxın.",
   },
   migration: {
     eyebrow: "Yeniləmədən sonra ilk açılış",

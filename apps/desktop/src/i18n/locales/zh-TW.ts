@@ -6528,6 +6528,9 @@ export default withEnglishFallback({
     iconThemeBlackDescriptionMac: "應用程式內使用黑色標誌；Dock 使用黑色底板，選單列跟隨系統。",
     showTrayIcon: "顯示系統匣/選單欄圖示",
     showTrayIconDescription: "關閉後不顯示圖示，但關閉視窗仍會像之前一樣隱藏到後台。",
+    appLock: "Windows Hello",
+    appLockDescription: "Windows Hello 會核對 Windows 使用者，不會加密資料庫，也不會阻止 dbx CLI。獨立的 MCP 行程是另外的信任邊界，不受此鎖定限制。",
+    appLockUnavailable: "Windows Hello 無法使用。",
     quitOnClose: "關閉視窗時退出程式",
     quitOnCloseDescription: "開啟後，點擊視窗關閉按鈕將徹底退出 DBX，而不是隱藏到系統匣。",
     closeActionPromptTitle: "關閉視窗",
@@ -10542,6 +10545,12 @@ export default withEnglishFallback({
     compact: "緊湊儲存格",
     titleLabel: "標題（可選）",
     titlePlaceholder: "例如：查詢結果",
+  },
+  appLock: {
+    title: "解鎖 DBX 後繼續",
+    retry: "重試",
+    quit: "結束",
+    unavailable: "Windows Hello 無法使用。請重試或結束。",
   },
   migration: {
     eyebrow: "升級後首次啟動",

@@ -7206,6 +7206,9 @@ export default withEnglishFallback({
     iconThemeBlackDescriptionMac: "Usa il logo nero nell'app; il Dock usa una base nera e la barra menu segue il sistema.",
     showTrayIcon: "Mostra icona nella barra delle applicazioni/menu",
     showTrayIconDescription: "Se disattivato, non viene mostrata alcuna icona, ma la chiusura della finestra nasconderà comunque DBX in background.",
+    appLock: "Windows Hello",
+    appLockDescription: "Windows Hello verifica l'utente Windows, non crittografa il database e non arresta la CLI dbx. Un processo MCP autonomo è un confine di fiducia separato e non è soggetto a questo blocco.",
+    appLockUnavailable: "Windows Hello non è disponibile.",
     quitOnClose: "Esci alla chiusura della finestra",
     quitOnCloseDescription: "Se attivato, il pulsante di chiusura termina completamente DBX invece di nasconderlo nella barra delle applicazioni.",
     closeActionPromptTitle: "Chiudi finestra",
@@ -10548,6 +10551,12 @@ export default withEnglishFallback({
     compact: "Celle compatte",
     titleLabel: "Titolo (facoltativo)",
     titlePlaceholder: "es. Risultato della query",
+  },
+  appLock: {
+    title: "Sblocca DBX per continuare",
+    retry: "Riprova",
+    quit: "Esci",
+    unavailable: "Windows Hello non è disponibile. Riprova o esci.",
   },
   migration: {
     eyebrow: "Primo avvio dopo l'aggiornamento",

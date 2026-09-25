@@ -6987,6 +6987,9 @@ export default withEnglishFallback({
     iconThemeBlackDescriptionMac: "앱에서 검정 로고를 사용합니다. Dock은 검정 판을 사용하고 메뉴 막대는 시스템을 따릅니다.",
     showTrayIcon: "트레이/메뉴 막대 아이콘 표시",
     showTrayIconDescription: "비활성화하면 아이콘이 표시되지 않지만, 창을 닫아도 이전처럼 DBX가 백그라운드에 숨겨집니다.",
+    appLock: "Windows Hello",
+    appLockDescription: "Windows Hello는 Windows 사용자를 확인합니다. 데이터베이스를 암호화하지 않으며 dbx CLI를 중단하지 않습니다. 독립 실행형 MCP 프로세스는 별도의 신뢰 경계이며 이 잠금의 적용을 받지 않습니다.",
+    appLockUnavailable: "Windows Hello를 사용할 수 없습니다.",
     quitOnClose: "창을 닫을 때 종료",
     quitOnCloseDescription: "활성화하면 닫기 버튼을 클릭할 때 DBX가 트레이에 숨기지 않고 완전히 종료됩니다. 모양 설정에서 나중에 변경할 수 있습니다.",
     closeActionPromptTitle: "창 닫기",
@@ -10003,6 +10006,12 @@ export default withEnglishFallback({
     compact: "셀 간격 좁게",
     titleLabel: "제목 (선택)",
     titlePlaceholder: "예: 쿼리 결과",
+  },
+  appLock: {
+    title: "계속하려면 DBX 잠금을 해제하세요",
+    retry: "다시 시도",
+    quit: "종료",
+    unavailable: "Windows Hello를 사용할 수 없습니다. 다시 시도하거나 종료하세요.",
   },
   migration: {
     eyebrow: "업그레이드 후 첫 실행",

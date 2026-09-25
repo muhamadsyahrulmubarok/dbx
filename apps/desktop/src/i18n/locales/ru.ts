@@ -8439,6 +8439,9 @@ export default withEnglishFallback({
     iconThemeBlackDescriptionMac: "Использовать чёрный логотип в приложении; Dock использует чёрную пластину, строка меню следует системе.",
     showTrayIcon: "Показывать значок в трее/строке меню",
     showTrayIconDescription: "Если отключено, значок не отображается, но закрытие окна по-прежнему скрывает DBX в фоне, как и раньше.",
+    appLock: "Windows Hello",
+    appLockDescription: "Windows Hello проверяет пользователя Windows, не шифрует базу данных и не останавливает CLI dbx. Отдельный процесс MCP — это отдельная граница доверия, и эта блокировка на него не распространяется.",
+    appLockUnavailable: "Windows Hello недоступен.",
     quitOnClose: "Выходить при закрытии окна",
     quitOnCloseDescription: "Если включено, нажатие кнопки закрытия полностью завершает DBX вместо сворачивания в трей. Это можно изменить позже в настройках внешнего вида.",
     closeActionPromptTitle: "Закрытие окна",
@@ -11683,6 +11686,12 @@ export default withEnglishFallback({
     compact: "Компактные ячейки",
     titleLabel: "Заголовок (необязательно)",
     titlePlaceholder: "например, Результат запроса",
+  },
+  appLock: {
+    title: "Разблокируйте DBX, чтобы продолжить",
+    retry: "Повторить",
+    quit: "Выйти",
+    unavailable: "Windows Hello недоступен. Повторите попытку или выйдите.",
   },
   migration: {
     eyebrow: "Первый запуск после обновления",

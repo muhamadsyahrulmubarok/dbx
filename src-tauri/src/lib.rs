@@ -2,7 +2,9 @@ mod background_backup;
 mod commands;
 mod data_dir;
 pub use background_backup::run_if_requested as run_backup_worker_if_requested;
+mod app_lock;
 mod db;
+mod hello;
 #[cfg(target_os = "macos")]
 mod macos_app_delegate;
 #[cfg(target_os = "macos")]
@@ -199,7 +201,11 @@ fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, conf
 }
 
 fn should_fallback_to_native_quit(target: &str, frontend_ready: bool) -> bool {
-    target == "quit" && !frontend_ready
+    // App.vue installs the close listener and then marks the frontend ready.
+    // Until then, emitting dbx-app-close-requested cannot quit. Window controls
+    // use "settings"; tray Quit uses "quit". A ready frontend with "settings"
+    // still asks the UI how to close.
+    !frontend_ready && matches!(target, "quit" | "settings")
 }
 
 fn native_window_decorations_override(target_os: &str) -> Option<bool> {
@@ -670,8 +676,9 @@ pub(crate) fn hide_main_window_for_close<R: tauri::Runtime>(app: &tauri::AppHand
 pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, target: &str) {
     let frontend_ready = app.try_state::<CloseBehaviorState>().is_some_and(|state| state.is_frontend_ready());
     if should_fallback_to_native_quit(target, frontend_ready) {
-        // A missing WebView2 runtime can prevent the frontend listener from ever
-        // loading. Only the explicit tray Quit fallback bypasses the prompt.
+        // The close listener is not installed (lock panel, migration gate, or a
+        // WebView that never finished loading). Exit instead of emitting an event
+        // nobody handles. A ready frontend still receives the event.
         if let Some(state) = app.try_state::<CloseBehaviorState>() {
             state.allow_next_exit();
         }
@@ -682,14 +689,30 @@ pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ta
     let _ = app.emit(APP_CLOSE_REQUESTED_EVENT, target);
 }
 
+fn app_lock_is_held(app: &tauri::AppHandle) -> bool {
+    app.try_state::<Arc<app_lock::AppLockGate>>().map(|gate| gate.is_locked()).unwrap_or(true)
+}
+
+fn emit_queued_deep_links(app: &tauri::AppHandle, queued: &commands::deep_link::QueuedDeepLinks) {
+    if !queued.connection.is_empty() {
+        let _ = app.emit("dbx-open-connection-links", &queued.connection);
+    }
+    if !queued.ai_config.is_empty() {
+        let _ = app.emit("dbx-open-ai-config-links", &queued.ai_config);
+    }
+    if !queued.plugin_install.is_empty() {
+        let _ = app.emit("dbx-open-plugin-install-links", &queued.plugin_install);
+    }
+}
+
 fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
     if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_connection_links(links.clone());
+        let queued = state.stage_connection_links(links, app_lock_is_held(app));
+        emit_queued_deep_links(app, &queued);
     }
-    let _ = app.emit("dbx-open-connection-links", links);
     show_main_window(app);
 }
 
@@ -698,9 +721,9 @@ fn open_ai_config_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
         return;
     }
     if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_ai_config_links(links.clone());
+        let queued = state.stage_ai_config_links(links, app_lock_is_held(app));
+        emit_queued_deep_links(app, &queued);
     }
-    let _ = app.emit("dbx-open-ai-config-links", links);
     show_main_window(app);
 }
 
@@ -709,9 +732,9 @@ fn open_plugin_install_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
         return;
     }
     if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_plugin_install_links(links.clone());
+        let queued = state.stage_plugin_install_links(links, app_lock_is_held(app));
+        emit_queued_deep_links(app, &queued);
     }
-    let _ = app.emit("dbx-open-plugin-install-links", links);
     show_main_window(app);
 }
 
@@ -1175,10 +1198,11 @@ mod tests {
     }
 
     #[test]
-    fn only_quit_uses_native_fallback_before_frontend_ready() {
+    fn native_exit_fallback_runs_when_the_close_listener_is_not_installed() {
         assert!(should_fallback_to_native_quit("quit", false));
+        assert!(should_fallback_to_native_quit("settings", false));
         assert!(!should_fallback_to_native_quit("quit", true));
-        assert!(!should_fallback_to_native_quit("settings", false));
+        assert!(!should_fallback_to_native_quit("settings", true));
     }
 
     #[test]
@@ -1576,6 +1600,10 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
             let data_dir_mode = startup_data_dir_mode(&data_dir_resolution.mode);
             append_startup_probe(format!("data dir ready mode={data_dir_mode}"));
+            let lock_config = app_lock::load_config(&data_dir);
+            let app_lock_gate = Arc::new(app_lock::AppLockGate::new(lock_config.enabled));
+            app.manage(app_lock_gate.clone());
+            app.manage(app_lock::AppLockPaths { data_dir: data_dir.clone() });
             let alternative_data_dir = data_dir::alternative_data_dir(&data_dir_resolution);
             match maybe_import_user_data_db(&data_dir, alternative_data_dir.as_deref()) {
                 Ok(result) => eprintln!("[STARTUP] data db fallback import: {result:?}"),
@@ -1686,27 +1714,10 @@ pub fn run() {
             let state = Arc::new(state);
             app.manage(state.clone());
             commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
-            let backups = tauri::async_runtime::block_on(async {
-                background_backup::BackgroundBackup::new(state.clone(), data_dir.clone())
-            });
-            match backups {
-                Ok(backups) => {
-                    if let Err(error) = backups.resume() {
-                        log::error!("[database-backup] background registration failed: {error}");
-                    }
-                    app.manage(backups);
-                }
-                Err(error) => log::error!("[database-backup] worker startup failed: {error}"),
-            }
+            app.manage(background_backup::BackgroundBackup::deferred(data_dir.clone()));
             let mcp_http_server = Arc::new(commands::mcp_http_server::McpHttpServerState::new(data_dir.clone()));
             app.manage(mcp_http_server.clone());
-            let mcp_http_state = state.clone();
-            let mcp_gate = migration_gate.clone();
-            tauri::async_runtime::spawn(async move {
-                mcp_gate.wait().await;
-                commands::mcp_http_server::start_if_enabled(mcp_http_state, mcp_http_server).await;
-            });
-            app.manage(commands::redis_pubsub_server::start_pubsub_server(state.clone()));
+            app.manage(commands::redis_pubsub_server::PubSubServerState::unavailable());
             app.manage(commands::saved_sql::SavedSqlStorageState { data_dir: data_dir.clone() });
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
             app.manage(commands::external_db::ExternalDbOpenState::default());
@@ -1723,16 +1734,47 @@ pub fn run() {
             webview2_recovery::install(app.handle());
             let startup_args: Vec<String> = std::env::args().skip(1).collect();
             let startup_links = commands::deep_link::connection_deep_links_from_args(&startup_args);
-            open_connection_deep_links(app.handle(), startup_links);
             let startup_ai_config_links = commands::deep_link::ai_config_deep_links_from_args(&startup_args);
-            open_ai_config_deep_links(app.handle(), startup_ai_config_links);
             let startup_plugin_install_links = commands::deep_link::plugin_install_deep_links_from_args(&startup_args);
-            open_plugin_install_deep_links(app.handle(), startup_plugin_install_links);
+            let has_startup_deep_links = !startup_links.is_empty()
+                || !startup_ai_config_links.is_empty()
+                || !startup_plugin_install_links.is_empty();
+            if let Some(deep_links) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
+                deep_links.push_connection_links(startup_links);
+                deep_links.push_ai_config_links(startup_ai_config_links);
+                deep_links.push_plugin_install_links(startup_plugin_install_links);
+            }
+            if has_startup_deep_links {
+                show_main_window(app.handle());
+            }
 
             let app_handle = app.handle().clone();
+            let deep_link_app = app_handle.clone();
+            let deep_link_lock = app_lock_gate.clone();
             tauri::async_runtime::spawn(async move {
-                migration_gate.wait().await;
-                commands::mcp_bridge::start(app_handle, state, data_dir);
+                deep_link_lock.wait_until_unlocked().await;
+                if let Some(deep_links) = deep_link_app.try_state::<commands::deep_link::DeepLinkOpenState>() {
+                    let queued = deep_links.release_queued_emits();
+                    emit_queued_deep_links(&deep_link_app, &queued);
+                }
+            });
+            let services_state = state.clone();
+            let services_dir = data_dir.clone();
+            let services_migration = migration_gate.clone();
+            let services_lock = app_lock_gate.clone();
+            let services_http = mcp_http_server.clone();
+            tauri::async_runtime::spawn(async move {
+                app_lock::wait_until_background_services_may_start(&services_migration, &services_lock).await;
+                if let Some(backups) = app_handle.try_state::<background_backup::BackgroundBackup>() {
+                    if let Err(error) = backups.start_worker() {
+                        log::error!("[database-backup] worker startup failed: {error}");
+                    }
+                }
+                if let Some(pubsub) = app_handle.try_state::<commands::redis_pubsub_server::PubSubServerState>() {
+                    pubsub.start_if_stopped(services_state.clone());
+                }
+                commands::mcp_http_server::start_if_enabled(services_state.clone(), services_http).await;
+                commands::mcp_bridge::start(app_handle, services_state, services_dir);
             });
             eprintln!("[STARTUP] setup complete in {:?} (total {:?})", setup_start.elapsed(), startup_begin.elapsed());
             append_startup_probe(format!(
@@ -1833,6 +1875,11 @@ pub fn run() {
             commands::prompt_template::set_ai_global_custom_instructions,
             commands::user_skills::list_user_skills,
             commands::user_skills::read_user_skills,
+            commands::app_lock::app_lock_status,
+            commands::app_lock::app_lock_availability,
+            commands::app_lock::app_lock_verify,
+            commands::app_lock::app_lock_enable,
+            commands::app_lock::app_lock_disable,
             commands::app_settings::load_desktop_settings,
             commands::app_settings::save_desktop_settings,
             commands::app_settings::load_max_agent_turns,
@@ -2841,11 +2888,15 @@ pub fn run() {
                 let app_handle = app_handle.clone();
                 let migration_gate =
                     app_handle.try_state::<Arc<migration_gate::MigrationGate>>().map(|state| state.inner().clone());
+                let app_lock_gate =
+                    app_handle.try_state::<Arc<app_lock::AppLockGate>>().map(|state| state.inner().clone());
                 tauri::async_runtime::spawn(async move {
                     let Some(migration_gate) = migration_gate else {
                         return;
                     };
-                    migration_gate.wait().await;
+                    if !app_lock::wait_until_connections_may_refresh(&migration_gate, app_lock_gate.as_deref()).await {
+                        return;
+                    }
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         state.refresh_connections().await;
                     }
@@ -2856,11 +2907,15 @@ pub fn run() {
                 let app_handle = app_handle.clone();
                 let migration_gate =
                     app_handle.try_state::<Arc<migration_gate::MigrationGate>>().map(|state| state.inner().clone());
+                let app_lock_gate =
+                    app_handle.try_state::<Arc<app_lock::AppLockGate>>().map(|state| state.inner().clone());
                 tauri::async_runtime::spawn(async move {
                     let Some(migration_gate) = migration_gate else {
                         return;
                     };
-                    migration_gate.wait().await;
+                    if !app_lock::wait_until_connections_may_refresh(&migration_gate, app_lock_gate.as_deref()).await {
+                        return;
+                    }
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         state.refresh_connections().await;
                     }
