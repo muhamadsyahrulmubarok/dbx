@@ -8,6 +8,7 @@ mod macos_app_delegate;
 #[cfg(target_os = "macos")]
 mod macos_escape_guard;
 mod app_lock;
+mod hello;
 mod migration_gate;
 mod models;
 mod plugin_ui_protocol;
