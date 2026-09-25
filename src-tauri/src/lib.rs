@@ -201,7 +201,11 @@ fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, conf
 }
 
 fn should_fallback_to_native_quit(target: &str, frontend_ready: bool) -> bool {
-    target == "quit" && !frontend_ready
+    // App.vue installs the close listener and then marks the frontend ready.
+    // Until then, emitting dbx-app-close-requested cannot quit. Window controls
+    // use "settings"; tray Quit uses "quit". A ready frontend with "settings"
+    // still asks the UI how to close.
+    !frontend_ready && matches!(target, "quit" | "settings")
 }
 
 fn native_window_decorations_override(target_os: &str) -> Option<bool> {
@@ -672,8 +676,9 @@ pub(crate) fn hide_main_window_for_close<R: tauri::Runtime>(app: &tauri::AppHand
 pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, target: &str) {
     let frontend_ready = app.try_state::<CloseBehaviorState>().is_some_and(|state| state.is_frontend_ready());
     if should_fallback_to_native_quit(target, frontend_ready) {
-        // A missing WebView2 runtime can prevent the frontend listener from ever
-        // loading. Only the explicit tray Quit fallback bypasses the prompt.
+        // The close listener is not installed (lock panel, migration gate, or a
+        // WebView that never finished loading). Exit instead of emitting an event
+        // nobody handles. A ready frontend still receives the event.
         if let Some(state) = app.try_state::<CloseBehaviorState>() {
             state.allow_next_exit();
         }
@@ -1193,10 +1198,11 @@ mod tests {
     }
 
     #[test]
-    fn only_quit_uses_native_fallback_before_frontend_ready() {
+    fn native_exit_fallback_runs_when_the_close_listener_is_not_installed() {
         assert!(should_fallback_to_native_quit("quit", false));
+        assert!(should_fallback_to_native_quit("settings", false));
         assert!(!should_fallback_to_native_quit("quit", true));
-        assert!(!should_fallback_to_native_quit("settings", false));
+        assert!(!should_fallback_to_native_quit("settings", true));
     }
 
     #[test]

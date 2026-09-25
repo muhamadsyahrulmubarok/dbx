@@ -42,6 +42,7 @@ pub fn allowed_command(command: &str) -> bool {
             | "quit_app"
             | "confirm_exit"
             | "complete_app_close"
+            | "request_app_close_from_window_controls"
             | "reveal_path_in_file_manager"
             | "get_platform"
             | "set_app_locale"
@@ -164,7 +165,7 @@ mod tests {
     #[test]
     fn invoke_dispatch_allows_window_close_while_locked() {
         use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets};
-        let migration = Arc::new(MigrationGate::new(true));
+        let migration = Arc::new(MigrationGate::new(false));
         let lock = Arc::new(crate::app_lock::AppLockGate::new(true));
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let command_calls = calls.clone();
