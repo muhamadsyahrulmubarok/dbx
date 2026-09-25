@@ -2356,6 +2356,22 @@ export async function requestAppClose(): Promise<void> {
   return undefined;
 }
 
+export async function appLockStatus(): Promise<{ enabled: boolean; locked: boolean }> {
+  return { enabled: false, locked: false };
+}
+
+export async function appLockVerify(): Promise<"verified" | "canceled" | "unavailable"> {
+  return "unavailable";
+}
+
+export async function enableAppLock(): Promise<"enabled" | "canceled" | "unavailable"> {
+  return "unavailable";
+}
+
+export async function disableAppLock(): Promise<void> {
+  return undefined;
+}
+
 export interface DriverStoreMigrationResult {
   driver_store_dir: string | null;
   plugin_store_dir: string | null;

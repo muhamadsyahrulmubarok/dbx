@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { nextLockEnabled } from "@/lib/startup/appLockSettings";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
@@ -987,6 +988,22 @@ export async function appLockStatus(): Promise<AppLockStatus> {
 export async function appLockVerify(): Promise<"verified" | "canceled" | "unavailable"> {
   const result = await invoke<{ outcome: "verified" | "canceled" | "unavailable" }>("app_lock_verify");
   return result.outcome;
+}
+
+export async function enableAppLock(): Promise<"enabled" | "canceled" | "unavailable"> {
+  const availability = await invoke<{ available: boolean }>("app_lock_availability");
+  const outcome = await appLockVerify();
+  const decision = nextLockEnabled({ available: availability.available, outcome });
+  if (decision === "enable") {
+    await invoke("app_lock_enable");
+    return "enabled";
+  }
+  if (decision === "keep") return "canceled";
+  return "unavailable";
+}
+
+export async function disableAppLock(): Promise<void> {
+  await invoke("app_lock_disable");
 }
 
 export interface DriverStoreMigrationResult {
