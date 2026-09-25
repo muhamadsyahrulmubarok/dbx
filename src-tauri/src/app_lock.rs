@@ -87,8 +87,9 @@ pub async fn wait_until_background_services_may_start(
     }
 }
 
-/// Resume and reopen may refresh connections only when a lock gate is present.
-/// A missing lock gate returns false and must not refresh.
+/// Resume and reopen may refresh connections only when a lock gate is present
+/// and `background_services_may_start` is true. A missing lock gate returns false
+/// and must not refresh. A false sample waits again.
 pub async fn wait_until_connections_may_refresh(
     migration: &crate::migration_gate::MigrationGate,
     lock: Option<&AppLockGate>,
@@ -96,9 +97,18 @@ pub async fn wait_until_connections_may_refresh(
     let Some(lock) = lock else {
         return false;
     };
-    migration.wait().await;
-    lock.wait_until_unlocked().await;
-    true
+    loop {
+        migration.wait().await;
+        lock.wait_until_unlocked().await;
+        let migration_ready = migration.is_ready();
+        let locked = lock.is_locked();
+        if background_services_may_start(migration_ready, locked) {
+            return true;
+        }
+        log::warn!(
+            "[app-lock] connection refresh deferred after a false start sample: migration_ready={migration_ready} locked={locked}"
+        );
+    }
 }
 
 pub fn save_config(data_dir: &Path, config: &AppLockConfig) -> Result<(), String> {
@@ -175,6 +185,27 @@ mod tests {
         tokio::pin!(wait);
         assert!(poll_now(wait.as_mut()).is_pending());
         lock.unlock();
+        assert_eq!(poll_now(wait.as_mut()), Poll::Ready(true));
+    }
+
+    #[tokio::test]
+    async fn connection_refresh_wait_returns_after_migration_clears_during_lock() {
+        let migration = crate::migration_gate::MigrationGate::new(true);
+        let lock = AppLockGate::new(true);
+        let wait = wait_until_connections_may_refresh(&migration, Some(&lock));
+        tokio::pin!(wait);
+
+        assert!(
+            poll_now(wait.as_mut()).is_pending(),
+            "the wait must park on the lock while migration is still ready"
+        );
+        migration.set_ready(false);
+        lock.unlock();
+        assert!(
+            poll_now(wait.as_mut()).is_pending(),
+            "a false sample after unlock must wait again instead of returning"
+        );
+        migration.set_ready(true);
         assert_eq!(poll_now(wait.as_mut()), Poll::Ready(true));
     }
 
