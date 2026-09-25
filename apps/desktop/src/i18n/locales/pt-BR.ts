@@ -10549,6 +10549,12 @@ export default withEnglishFallback({
     titleLabel: "Título (opcional)",
     titlePlaceholder: "ex.: Resultado da consulta",
   },
+  appLock: {
+    title: "Desbloqueie o DBX para continuar",
+    retry: "Tentar novamente",
+    quit: "Sair",
+    unavailable: "O Windows Hello não está disponível. Tente novamente ou saia.",
+  },
   migration: {
     eyebrow: "Primeiro início após a atualização",
     title: "Atualização da segurança dos dados",

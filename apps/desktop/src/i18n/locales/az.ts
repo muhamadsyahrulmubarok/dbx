@@ -10404,6 +10404,12 @@ export default withEnglishFallback({
     titleLabel: "Başlıq (istəyə bağlı)",
     titlePlaceholder: "Məsələn, sorğu nəticəsi",
   },
+  appLock: {
+    title: "Davam etmək üçün DBX kilidini açın",
+    retry: "Yenidən cəhd et",
+    quit: "Çıx",
+    unavailable: "Windows Hello əlçatan deyil. Yenidən cəhd edin və ya çıxın.",
+  },
   migration: {
     eyebrow: "Yeniləmədən sonra ilk açılış",
     title: "Məlumat təhlükəsizliyi yeniləməsi",

@@ -10597,6 +10597,12 @@ export default withEnglishFallback({
     titleLabel: "タイトル（任意）",
     titlePlaceholder: "例：クエリ結果",
   },
+  appLock: {
+    title: "続けるには DBX のロックを解除してください",
+    retry: "再試行",
+    quit: "終了",
+    unavailable: "Windows Hello を利用できません。再試行するか終了してください。",
+  },
   migration: {
     eyebrow: "アップグレード後の初回起動",
     title: "データセキュリティのアップグレード",

@@ -10543,6 +10543,12 @@ export default withEnglishFallback({
     titleLabel: "標題（可選）",
     titlePlaceholder: "例如：查詢結果",
   },
+  appLock: {
+    title: "解鎖 DBX 後繼續",
+    retry: "重試",
+    quit: "結束",
+    unavailable: "Windows Hello 無法使用。請重試或結束。",
+  },
   migration: {
     eyebrow: "升級後首次啟動",
     title: "資料安全升級",

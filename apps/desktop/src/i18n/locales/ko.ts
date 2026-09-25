@@ -10004,6 +10004,12 @@ export default withEnglishFallback({
     titleLabel: "제목 (선택)",
     titlePlaceholder: "예: 쿼리 결과",
   },
+  appLock: {
+    title: "계속하려면 DBX 잠금을 해제하세요",
+    retry: "다시 시도",
+    quit: "종료",
+    unavailable: "Windows Hello를 사용할 수 없습니다. 다시 시도하거나 종료하세요.",
+  },
   migration: {
     eyebrow: "업그레이드 후 첫 실행",
     title: "데이터 보안 업그레이드",

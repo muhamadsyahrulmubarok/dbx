@@ -11148,6 +11148,12 @@ export default {
     titleLabel: "Title (optional)",
     titlePlaceholder: "e.g. Query result",
   },
+  appLock: {
+    title: "Unlock DBX to continue",
+    retry: "Retry",
+    quit: "Quit",
+    unavailable: "Windows Hello is unavailable. Retry or quit.",
+  },
   migration: {
     eyebrow: "First launch after upgrade",
     title: "Data security upgrade",

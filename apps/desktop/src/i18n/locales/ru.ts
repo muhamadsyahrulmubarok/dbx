@@ -11684,6 +11684,12 @@ export default withEnglishFallback({
     titleLabel: "Заголовок (необязательно)",
     titlePlaceholder: "например, Результат запроса",
   },
+  appLock: {
+    title: "Разблокируйте DBX, чтобы продолжить",
+    retry: "Повторить",
+    quit: "Выйти",
+    unavailable: "Windows Hello недоступен. Повторите попытку или выйдите.",
+  },
   migration: {
     eyebrow: "Первый запуск после обновления",
     title: "Обновление защиты данных",

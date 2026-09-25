@@ -11115,6 +11115,12 @@ export default withEnglishFallback({
     titleLabel: "标题（可选）",
     titlePlaceholder: "例如：查询结果",
   },
+  appLock: {
+    title: "解锁 DBX 后继续",
+    retry: "重试",
+    quit: "退出",
+    unavailable: "Windows Hello 不可用。请重试或退出。",
+  },
   migration: {
     eyebrow: "升级后的首次启动",
     title: "数据安全升级",

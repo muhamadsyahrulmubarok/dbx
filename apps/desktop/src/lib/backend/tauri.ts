@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
@@ -971,6 +972,21 @@ export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
 
 export async function requestAppClose(): Promise<void> {
   return invoke("request_app_close_from_window_controls");
+}
+
+export interface AppLockStatus {
+  enabled: boolean;
+  locked: boolean;
+}
+
+export async function appLockStatus(): Promise<AppLockStatus> {
+  if (!isTauriRuntime()) return { enabled: false, locked: false };
+  return invoke<AppLockStatus>("app_lock_status");
+}
+
+export async function appLockVerify(): Promise<"verified" | "canceled" | "unavailable"> {
+  const result = await invoke<{ outcome: "verified" | "canceled" | "unavailable" }>("app_lock_verify");
+  return result.outcome;
 }
 
 export interface DriverStoreMigrationResult {
