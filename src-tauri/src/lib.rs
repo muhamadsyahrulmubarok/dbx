@@ -1578,6 +1578,10 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
             let data_dir_mode = startup_data_dir_mode(&data_dir_resolution.mode);
             append_startup_probe(format!("data dir ready mode={data_dir_mode}"));
+            let lock_config = app_lock::load_config(&data_dir);
+            let app_lock_gate = Arc::new(app_lock::AppLockGate::new(lock_config.enabled));
+            app.manage(app_lock_gate.clone());
+            app.manage(app_lock::AppLockPaths { data_dir: data_dir.clone() });
             let alternative_data_dir = data_dir::alternative_data_dir(&data_dir_resolution);
             match maybe_import_user_data_db(&data_dir, alternative_data_dir.as_deref()) {
                 Ok(result) => eprintln!("[STARTUP] data db fallback import: {result:?}"),
@@ -1835,6 +1839,11 @@ pub fn run() {
             commands::prompt_template::set_ai_global_custom_instructions,
             commands::user_skills::list_user_skills,
             commands::user_skills::read_user_skills,
+            commands::app_lock::app_lock_status,
+            commands::app_lock::app_lock_availability,
+            commands::app_lock::app_lock_verify,
+            commands::app_lock::app_lock_enable,
+            commands::app_lock::app_lock_disable,
             commands::app_settings::load_desktop_settings,
             commands::app_settings::save_desktop_settings,
             commands::app_settings::load_max_agent_turns,

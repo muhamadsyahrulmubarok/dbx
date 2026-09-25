@@ -1,0 +1,184 @@
+use std::path::Path;
+use std::sync::Arc;
+
+use serde::Serialize;
+use tauri::State;
+
+use crate::app_lock::{load_config, save_config, AppLockConfig, AppLockGate, AppLockPaths};
+use crate::hello::{availability, request_verification, HelloAvailability, HelloPrompt};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AppLockStatus {
+    pub enabled: bool,
+    pub locked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AppLockAvailability {
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AppLockVerifyResult {
+    pub outcome: String,
+}
+
+pub(crate) fn enable_decision(available: bool, prompt: HelloPrompt) -> Result<(), &'static str> {
+    if !available || prompt != HelloPrompt::Verified {
+        return Err("APP_LOCK_UNAVAILABLE");
+    }
+    Ok(())
+}
+
+pub(crate) fn enable_lock(
+    gate: &AppLockGate,
+    data_dir: &Path,
+    available: bool,
+    prompt: HelloPrompt,
+) -> Result<(), String> {
+    enable_decision(available, prompt)?;
+    save_config(data_dir, &AppLockConfig { enabled: true })?;
+    gate.unlock();
+    Ok(())
+}
+
+pub(crate) fn disable_lock(gate: &AppLockGate, data_dir: &Path) -> Result<(), String> {
+    if gate.is_locked() {
+        return Err("APP_LOCK_REQUIRED".to_string());
+    }
+    save_config(data_dir, &AppLockConfig { enabled: false })
+}
+
+pub(crate) fn verify_outcome(gate: &AppLockGate, prompt: HelloPrompt) -> &'static str {
+    match prompt {
+        HelloPrompt::Verified => {
+            gate.unlock();
+            "verified"
+        }
+        HelloPrompt::Canceled => "canceled",
+        HelloPrompt::Unavailable => "unavailable",
+    }
+}
+
+pub(crate) fn current_status(gate: &AppLockGate, data_dir: &Path) -> AppLockStatus {
+    AppLockStatus { enabled: load_config(data_dir).enabled, locked: gate.is_locked() }
+}
+
+#[tauri::command]
+pub fn app_lock_status(gate: State<'_, Arc<AppLockGate>>, paths: State<'_, AppLockPaths>) -> AppLockStatus {
+    current_status(&gate, &paths.data_dir)
+}
+
+#[tauri::command]
+pub fn app_lock_availability() -> AppLockAvailability {
+    AppLockAvailability { available: matches!(availability(), HelloAvailability::Available) }
+}
+
+#[tauri::command]
+pub async fn app_lock_verify(gate: State<'_, Arc<AppLockGate>>) -> Result<AppLockVerifyResult, String> {
+    let prompt = request_verification().await;
+    Ok(AppLockVerifyResult { outcome: verify_outcome(&gate, prompt).to_string() })
+}
+
+#[tauri::command]
+pub async fn app_lock_enable(
+    gate: State<'_, Arc<AppLockGate>>,
+    paths: State<'_, AppLockPaths>,
+) -> Result<AppLockStatus, String> {
+    let available = matches!(availability(), HelloAvailability::Available);
+    let prompt = request_verification().await;
+    enable_lock(&gate, &paths.data_dir, available, prompt)?;
+    Ok(current_status(&gate, &paths.data_dir))
+}
+
+#[tauri::command]
+pub fn app_lock_disable(
+    gate: State<'_, Arc<AppLockGate>>,
+    paths: State<'_, AppLockPaths>,
+) -> Result<AppLockStatus, String> {
+    disable_lock(&gate, &paths.data_dir)?;
+    Ok(current_status(&gate, &paths.data_dir))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_lock::{load_config, save_config, AppLockConfig, AppLockGate};
+    use crate::hello::HelloPrompt;
+
+    #[test]
+    fn enable_requires_a_verified_prompt() {
+        assert!(enable_decision(true, HelloPrompt::Verified).is_ok());
+        assert!(enable_decision(true, HelloPrompt::Canceled).is_err());
+        assert!(enable_decision(false, HelloPrompt::Verified).is_err());
+    }
+
+    #[test]
+    fn disable_rejects_a_locked_gate_and_does_not_clear_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        save_config(dir.path(), &AppLockConfig { enabled: true }).unwrap();
+        let gate = AppLockGate::new(true);
+        let err = disable_lock(&gate, dir.path()).unwrap_err();
+        assert_eq!(err, "APP_LOCK_REQUIRED");
+        assert!(load_config(dir.path()).enabled);
+    }
+
+    #[test]
+    fn disable_clears_the_file_when_the_gate_is_unlocked() {
+        let dir = tempfile::tempdir().unwrap();
+        save_config(dir.path(), &AppLockConfig { enabled: true }).unwrap();
+        let gate = AppLockGate::new(true);
+        gate.unlock();
+        disable_lock(&gate, dir.path()).unwrap();
+        assert!(!load_config(dir.path()).enabled);
+        assert!(!gate.is_locked());
+    }
+
+    #[test]
+    fn enable_failure_leaves_the_file_unchanged_and_keeps_the_gate_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = AppLockGate::new(true);
+        let err = enable_lock(&gate, dir.path(), true, HelloPrompt::Canceled).unwrap_err();
+        assert_eq!(err, "APP_LOCK_UNAVAILABLE");
+        assert!(gate.is_locked());
+        assert!(!load_config(dir.path()).enabled);
+    }
+
+    #[test]
+    fn enable_persists_the_flag_and_unlocks_after_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = AppLockGate::new(true);
+        enable_lock(&gate, dir.path(), true, HelloPrompt::Verified).unwrap();
+        assert!(load_config(dir.path()).enabled);
+        assert!(!gate.is_locked());
+    }
+
+    #[test]
+    fn verify_unlocks_only_for_verified_and_keeps_a_disabled_gate_open() {
+        let locked = AppLockGate::new(true);
+        assert_eq!(verify_outcome(&locked, HelloPrompt::Canceled), "canceled");
+        assert!(locked.is_locked());
+        assert_eq!(verify_outcome(&locked, HelloPrompt::Unavailable), "unavailable");
+        assert!(locked.is_locked());
+        assert_eq!(verify_outcome(&locked, HelloPrompt::Verified), "verified");
+        assert!(!locked.is_locked());
+
+        let open = AppLockGate::new(false);
+        assert_eq!(verify_outcome(&open, HelloPrompt::Canceled), "canceled");
+        assert!(!open.is_locked());
+    }
+
+    #[test]
+    fn status_reports_the_saved_flag_and_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        save_config(dir.path(), &AppLockConfig { enabled: true }).unwrap();
+        let gate = AppLockGate::new(true);
+        let status = current_status(&gate, dir.path());
+        assert!(status.enabled);
+        assert!(status.locked);
+        gate.unlock();
+        let status = current_status(&gate, dir.path());
+        assert!(status.enabled);
+        assert!(!status.locked);
+    }
+}

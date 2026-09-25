@@ -54,6 +54,10 @@ pub struct AppLockConfig {
     pub enabled: bool,
 }
 
+pub struct AppLockPaths {
+    pub data_dir: PathBuf,
+}
+
 pub fn config_path(data_dir: &Path) -> PathBuf {
     data_dir.join("app-lock.json")
 }
