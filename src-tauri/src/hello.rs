@@ -1,5 +1,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelloAvailability {
+    #[allow(dead_code)]
     Available,
     Unavailable,
 }
@@ -74,8 +75,26 @@ mod tests {
         assert_eq!(availability(), HelloAvailability::Unavailable);
     }
 
+    #[tokio::test]
+    async fn non_windows_request_verification_is_unavailable() {
+        if cfg!(windows) {
+            return;
+        }
+        assert_eq!(request_verification().await, HelloPrompt::Unavailable);
+    }
+
+    #[test]
+    fn success_hresult_maps_to_verified() {
+        assert_eq!(prompt_from_hresult(0), HelloPrompt::Verified);
+    }
+
     #[test]
     fn canceled_hresult_maps_to_canceled() {
         assert_eq!(prompt_from_hresult(-2147023673), HelloPrompt::Canceled); // HRESULT_FROM_WIN32(ERROR_CANCELLED)
+    }
+
+    #[test]
+    fn other_hresult_maps_to_unavailable() {
+        assert_eq!(prompt_from_hresult(0x80004005u32 as i32), HelloPrompt::Unavailable); // E_FAIL
     }
 }

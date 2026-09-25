@@ -98,3 +98,4 @@ windows = { version = "0.61", features = [
   "Foundation",
   "Security_Credentials_UI",
 ] }
+windows-future = { version = "0.2", features = ["std"] }
