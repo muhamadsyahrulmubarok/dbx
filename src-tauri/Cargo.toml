@@ -97,5 +97,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 windows = { version = "0.61", features = [
   "Foundation",
   "Security_Credentials_UI",
+  "Win32_System_WinRT",
 ] }
 windows-future = { version = "0.2", features = ["std"] }

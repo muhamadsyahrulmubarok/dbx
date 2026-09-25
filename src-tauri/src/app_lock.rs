@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct AppLockGate {
     enabled: AtomicBool,
     unlocked: AtomicBool,
+    /// One-shot permit set only after a verified Hello prompt.
+    enable_ticket: AtomicBool,
     changed: tokio::sync::Notify,
 }
 
@@ -13,8 +15,21 @@ impl AppLockGate {
         Self {
             enabled: AtomicBool::new(enabled),
             unlocked: AtomicBool::new(!enabled),
+            enable_ticket: AtomicBool::new(false),
             changed: tokio::sync::Notify::new(),
         }
+    }
+
+    pub(crate) fn grant_verified_enable_ticket(&self) {
+        self.enable_ticket.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn has_enable_ticket(&self) -> bool {
+        self.enable_ticket.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn take_enable_ticket(&self) -> bool {
+        self.enable_ticket.swap(false, Ordering::AcqRel)
     }
 
     pub fn is_locked(&self) -> bool {

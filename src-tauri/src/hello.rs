@@ -23,7 +23,7 @@ pub(crate) fn prompt_from_hresult(code: i32) -> HelloPrompt {
 }
 
 #[cfg(not(windows))]
-pub fn availability() -> HelloAvailability {
+pub async fn availability() -> HelloAvailability {
     HelloAvailability::Unavailable
 }
 
@@ -33,27 +33,49 @@ pub async fn request_verification() -> HelloPrompt {
 }
 
 #[cfg(windows)]
-pub fn availability() -> HelloAvailability {
+pub async fn availability() -> HelloAvailability {
     use windows::Security::Credentials::UI::{UserConsentVerifier, UserConsentVerifierAvailability};
 
-    match UserConsentVerifier::CheckAvailabilityAsync() {
-        Ok(operation) => match operation.get() {
-            Ok(UserConsentVerifierAvailability::Available) => HelloAvailability::Available,
-            _ => HelloAvailability::Unavailable,
-        },
-        Err(_) => HelloAvailability::Unavailable,
+    let operation = match UserConsentVerifier::CheckAvailabilityAsync() {
+        Ok(operation) => operation,
+        Err(_) => return HelloAvailability::Unavailable,
+    };
+
+    match operation.await {
+        Ok(UserConsentVerifierAvailability::Available) => HelloAvailability::Available,
+        _ => HelloAvailability::Unavailable,
     }
 }
 
 #[cfg(windows)]
-pub async fn request_verification() -> HelloPrompt {
+pub async fn request_verification(app: &tauri::AppHandle) -> HelloPrompt {
+    use tauri::Manager;
     use windows::core::HSTRING;
-    use windows::Security::Credentials::UI::{UserConsentVerifier, UserConsentVerificationResult};
+    use windows::Security::Credentials::UI::{UserConsentVerificationResult, UserConsentVerifier};
+    use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
+    use windows_future::IAsyncOperation;
 
-    let operation = match UserConsentVerifier::RequestVerificationAsync(&HSTRING::from("Unlock DBX")) {
-        Ok(operation) => operation,
+    let hwnd = {
+        let Some(window) = app.get_webview_window("main") else {
+            return HelloPrompt::Unavailable;
+        };
+        match window.hwnd() {
+            Ok(hwnd) if !hwnd.is_invalid() => hwnd,
+            _ => return HelloPrompt::Unavailable,
+        }
+    };
+
+    let interop = match windows::core::factory::<UserConsentVerifier, IUserConsentVerifierInterop>() {
+        Ok(interop) => interop,
         Err(error) => return prompt_from_hresult(error.code().0),
     };
+
+    // SAFETY: `hwnd` is the process main window, and this is the documented Win32 interop for UserConsentVerifier.
+    let operation: IAsyncOperation<UserConsentVerificationResult> =
+        match unsafe { interop.RequestVerificationForWindowAsync(hwnd, &HSTRING::from("Unlock DBX")) } {
+            Ok(operation) => operation,
+            Err(error) => return prompt_from_hresult(error.code().0),
+        };
 
     match operation.await {
         Ok(UserConsentVerificationResult::Verified) => HelloPrompt::Verified,
@@ -67,12 +89,12 @@ pub async fn request_verification() -> HelloPrompt {
 mod tests {
     use super::*;
 
-    #[test]
-    fn non_windows_availability_is_unavailable() {
+    #[tokio::test]
+    async fn non_windows_availability_is_unavailable() {
         if cfg!(windows) {
             return;
         }
-        assert_eq!(availability(), HelloAvailability::Unavailable);
+        assert_eq!(availability().await, HelloAvailability::Unavailable);
     }
 
     #[tokio::test]
@@ -95,6 +117,7 @@ mod tests {
 
     #[test]
     fn other_hresult_maps_to_unavailable() {
-        assert_eq!(prompt_from_hresult(0x80004005u32 as i32), HelloPrompt::Unavailable); // E_FAIL
+        assert_eq!(prompt_from_hresult(0x80004005u32 as i32), HelloPrompt::Unavailable);
+        // E_FAIL
     }
 }
