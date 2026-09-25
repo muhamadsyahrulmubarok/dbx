@@ -1758,11 +1758,7 @@ pub fn run() {
             let services_lock = app_lock_gate.clone();
             let services_http = mcp_http_server.clone();
             tauri::async_runtime::spawn(async move {
-                services_migration.wait().await;
-                services_lock.wait_until_unlocked().await;
-                if !app_lock::background_services_may_start(services_migration.is_ready(), services_lock.is_locked()) {
-                    return;
-                }
+                app_lock::wait_until_background_services_may_start(&services_migration, &services_lock).await;
                 if let Some(backups) = app_handle.try_state::<background_backup::BackgroundBackup>() {
                     if let Err(error) = backups.start_worker() {
                         log::error!("[database-backup] worker startup failed: {error}");
@@ -2886,11 +2882,15 @@ pub fn run() {
                 let app_handle = app_handle.clone();
                 let migration_gate =
                     app_handle.try_state::<Arc<migration_gate::MigrationGate>>().map(|state| state.inner().clone());
+                let app_lock_gate =
+                    app_handle.try_state::<Arc<app_lock::AppLockGate>>().map(|state| state.inner().clone());
                 tauri::async_runtime::spawn(async move {
                     let Some(migration_gate) = migration_gate else {
                         return;
                     };
-                    migration_gate.wait().await;
+                    if !app_lock::wait_until_connections_may_refresh(&migration_gate, app_lock_gate.as_deref()).await {
+                        return;
+                    }
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         state.refresh_connections().await;
                     }
@@ -2901,11 +2901,15 @@ pub fn run() {
                 let app_handle = app_handle.clone();
                 let migration_gate =
                     app_handle.try_state::<Arc<migration_gate::MigrationGate>>().map(|state| state.inner().clone());
+                let app_lock_gate =
+                    app_handle.try_state::<Arc<app_lock::AppLockGate>>().map(|state| state.inner().clone());
                 tauri::async_runtime::spawn(async move {
                     let Some(migration_gate) = migration_gate else {
                         return;
                     };
-                    migration_gate.wait().await;
+                    if !app_lock::wait_until_connections_may_refresh(&migration_gate, app_lock_gate.as_deref()).await {
+                        return;
+                    }
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         state.refresh_connections().await;
                     }
