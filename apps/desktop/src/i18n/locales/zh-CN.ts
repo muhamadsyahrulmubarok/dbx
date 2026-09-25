@@ -7878,7 +7878,7 @@ export default withEnglishFallback({
     showTrayIcon: "显示系统托盘/菜单栏图标",
     showTrayIconDescription: "关闭后不显示图标，但关闭窗口仍会像之前一样隐藏到后台。",
     appLock: "Windows Hello",
-    appLockDescription: "Windows Hello 会核验 Windows 用户，不会加密数据库，也不会阻止 dbx CLI。",
+    appLockDescription: "Windows Hello 会核验 Windows 用户，不会加密数据库，也不会阻止 dbx CLI。独立的 MCP 进程是单独的信任边界，不受此锁定限制。",
     appLockUnavailable: "Windows Hello 不可用。",
     quitOnClose: "关闭窗口时退出程序",
     quitOnCloseDescription: "开启后，点击窗口关闭按钮将彻底退出 DBX，而不是隐藏到系统托盘。",

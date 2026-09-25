@@ -8440,7 +8440,7 @@ export default withEnglishFallback({
     showTrayIcon: "Показывать значок в трее/строке меню",
     showTrayIconDescription: "Если отключено, значок не отображается, но закрытие окна по-прежнему скрывает DBX в фоне, как и раньше.",
     appLock: "Windows Hello",
-    appLockDescription: "Windows Hello проверяет пользователя Windows, не шифрует базу данных и не останавливает CLI dbx.",
+    appLockDescription: "Windows Hello проверяет пользователя Windows, не шифрует базу данных и не останавливает CLI dbx. Отдельный процесс MCP — это отдельная граница доверия, и эта блокировка на него не распространяется.",
     appLockUnavailable: "Windows Hello недоступен.",
     quitOnClose: "Выходить при закрытии окна",
     quitOnCloseDescription: "Если включено, нажатие кнопки закрытия полностью завершает DBX вместо сворачивания в трей. Это можно изменить позже в настройках внешнего вида.",

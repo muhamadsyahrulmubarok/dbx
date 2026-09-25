@@ -2944,6 +2944,7 @@ async function onAppLockToggle(checked: boolean | "indeterminate") {
     }
   } catch (error) {
     appLockEnabled.value = false;
+    if (appLockErrorText(error).includes("APP_LOCK_UNAVAILABLE")) return;
     toast(appLockErrorText(error));
   } finally {
     appLockBusy.value = false;

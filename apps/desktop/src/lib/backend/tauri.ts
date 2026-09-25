@@ -995,7 +995,13 @@ export async function enableAppLock(): Promise<"enabled" | "canceled" | "unavail
   const outcome = await appLockVerify();
   const decision = nextLockEnabled({ available: availability.available, outcome });
   if (decision === "enable") {
-    await invoke("app_lock_enable");
+    try {
+      await invoke("app_lock_enable");
+    } catch (error) {
+      const message = typeof error === "string" ? error : error instanceof Error ? error.message : "";
+      if (message.includes("APP_LOCK_UNAVAILABLE")) return "canceled";
+      throw error;
+    }
     return "enabled";
   }
   if (decision === "keep") return "canceled";

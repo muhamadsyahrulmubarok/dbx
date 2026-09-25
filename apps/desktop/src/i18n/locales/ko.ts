@@ -6988,7 +6988,7 @@ export default withEnglishFallback({
     showTrayIcon: "트레이/메뉴 막대 아이콘 표시",
     showTrayIconDescription: "비활성화하면 아이콘이 표시되지 않지만, 창을 닫아도 이전처럼 DBX가 백그라운드에 숨겨집니다.",
     appLock: "Windows Hello",
-    appLockDescription: "Windows Hello는 Windows 사용자를 확인합니다. 데이터베이스를 암호화하지 않으며 dbx CLI를 중단하지 않습니다.",
+    appLockDescription: "Windows Hello는 Windows 사용자를 확인합니다. 데이터베이스를 암호화하지 않으며 dbx CLI를 중단하지 않습니다. 독립 실행형 MCP 프로세스는 별도의 신뢰 경계이며 이 잠금의 적용을 받지 않습니다.",
     appLockUnavailable: "Windows Hello를 사용할 수 없습니다.",
     quitOnClose: "창을 닫을 때 종료",
     quitOnCloseDescription: "활성화하면 닫기 버튼을 클릭할 때 DBX가 트레이에 숨기지 않고 완전히 종료됩니다. 모양 설정에서 나중에 변경할 수 있습니다.",

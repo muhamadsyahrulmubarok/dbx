@@ -7140,7 +7140,7 @@ export default withEnglishFallback({
     showTrayIcon: "Tepsi/menü çubuğu simgesini göster",
     showTrayIconDescription: "Kapatıldığında simge gösterilmez, ancak pencereyi kapatmak yine de eskisi gibi DBX'i arka planda gizler.",
     appLock: "Windows Hello",
-    appLockDescription: "Windows Hello Windows kullanıcısını doğrular, veritabanını şifrelemez ve dbx CLI'yi durdurmaz.",
+    appLockDescription: "Windows Hello Windows kullanıcısını doğrular, veritabanını şifrelemez ve dbx CLI'yi durdurmaz. Bağımsız bir MCP işlemi ayrı bir güven sınırıdır ve bu kilit tarafından kapsanmaz.",
     appLockUnavailable: "Windows Hello kullanılamıyor.",
     quitOnClose: "Pencere kapatılınca çık",
     quitOnCloseDescription: "Etkinleştirildiğinde kapatma düğmesine tıklamak DBX'i tepsiye gizlemek yerine tümüyle kapatır. Bunu daha sonra Görünüm ayarlarından değiştirebilirsiniz.",

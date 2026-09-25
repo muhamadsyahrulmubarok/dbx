@@ -36,7 +36,11 @@ pub(crate) fn enable_lock(
     available: bool,
     prompt: HelloPrompt,
 ) -> Result<(), String> {
-    enable_decision(available, prompt)?;
+    if gate.is_locked() {
+        enable_decision(available, prompt)?;
+    } else if !available {
+        return Err("APP_LOCK_UNAVAILABLE".to_string());
+    }
     save_config(data_dir, &AppLockConfig { enabled: true })?;
     gate.unlock();
     Ok(())
@@ -86,7 +90,8 @@ pub async fn app_lock_enable(
     paths: State<'_, AppLockPaths>,
 ) -> Result<AppLockStatus, String> {
     let available = matches!(availability(), HelloAvailability::Available);
-    let prompt = request_verification().await;
+    // `app_lock_verify` already prompted and unlocked. Do not prompt again.
+    let prompt = if gate.is_locked() { request_verification().await } else { HelloPrompt::Canceled };
     enable_lock(&gate, &paths.data_dir, available, prompt)?;
     Ok(current_status(&gate, &paths.data_dir))
 }
@@ -142,6 +147,22 @@ mod tests {
         assert_eq!(err, "APP_LOCK_UNAVAILABLE");
         assert!(gate.is_locked());
         assert!(!load_config(dir.path()).enabled);
+    }
+
+    #[test]
+    fn enable_persists_without_a_second_prompt_when_unlocked_and_rejects_cancel_while_locked() {
+        let open_dir = tempfile::tempdir().unwrap();
+        let open = AppLockGate::new(false);
+        enable_lock(&open, open_dir.path(), true, HelloPrompt::Canceled).unwrap();
+        assert!(load_config(open_dir.path()).enabled);
+        assert!(!open.is_locked());
+
+        let locked_dir = tempfile::tempdir().unwrap();
+        let locked = AppLockGate::new(true);
+        let err = enable_lock(&locked, locked_dir.path(), true, HelloPrompt::Canceled).unwrap_err();
+        assert_eq!(err, "APP_LOCK_UNAVAILABLE");
+        assert!(locked.is_locked());
+        assert!(!load_config(locked_dir.path()).enabled);
     }
 
     #[test]

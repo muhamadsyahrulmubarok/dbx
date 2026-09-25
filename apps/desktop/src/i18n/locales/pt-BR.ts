@@ -7208,7 +7208,7 @@ export default withEnglishFallback({
     showTrayIcon: "Mostrar ícone na bandeja/barra de menus",
     showTrayIconDescription: "Quando desativado, nenhum ícone é exibido, mas fechar a janela ainda oculta o DBX em segundo plano como antes.",
     appLock: "Windows Hello",
-    appLockDescription: "O Windows Hello verifica o usuário do Windows, não criptografa o banco de dados e não interrompe a CLI dbx.",
+    appLockDescription: "O Windows Hello verifica o usuário do Windows, não criptografa o banco de dados e não interrompe a CLI dbx. Um processo MCP independente é um limite de confiança separado e não é controlado por este bloqueio.",
     appLockUnavailable: "O Windows Hello não está disponível.",
     quitOnClose: "Sair ao fechar a janela",
     quitOnCloseDescription: "Quando ativado, o botão de fechar encerra o DBX completamente em vez de minimizar para a bandeja.",

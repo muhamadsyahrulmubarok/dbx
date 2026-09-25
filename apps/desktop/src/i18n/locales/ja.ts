@@ -7243,7 +7243,7 @@ export default withEnglishFallback({
     showTrayIcon: "トレイ/メニューバーアイコンを表示",
     showTrayIconDescription: "無効時はアイコンが表示されませんが、ウィンドウを閉じると従来通りDBXはバックグラウンドに隠れます。",
     appLock: "Windows Hello",
-    appLockDescription: "Windows Hello は Windows ユーザーを確認します。データベースは暗号化せず、dbx CLI も停止しません。",
+    appLockDescription: "Windows Hello は Windows ユーザーを確認します。データベースは暗号化せず、dbx CLI も停止しません。スタンドアロンの MCP プロセスは別の信頼境界であり、このロックの対象外です。",
     appLockUnavailable: "Windows Hello は利用できません。",
     quitOnClose: "ウィンドウを閉じるときに終了",
     quitOnCloseDescription: "有効にすると、閉じるボタンでトレイに隠すのではなく、DBXを完全に終了します。",

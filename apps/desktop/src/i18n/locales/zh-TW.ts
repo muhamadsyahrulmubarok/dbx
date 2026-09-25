@@ -6529,7 +6529,7 @@ export default withEnglishFallback({
     showTrayIcon: "顯示系統匣/選單欄圖示",
     showTrayIconDescription: "關閉後不顯示圖示，但關閉視窗仍會像之前一樣隱藏到後台。",
     appLock: "Windows Hello",
-    appLockDescription: "Windows Hello 會核對 Windows 使用者，不會加密資料庫，也不會阻止 dbx CLI。",
+    appLockDescription: "Windows Hello 會核對 Windows 使用者，不會加密資料庫，也不會阻止 dbx CLI。獨立的 MCP 行程是另外的信任邊界，不受此鎖定限制。",
     appLockUnavailable: "Windows Hello 無法使用。",
     quitOnClose: "關閉視窗時退出程式",
     quitOnCloseDescription: "開啟後，點擊視窗關閉按鈕將徹底退出 DBX，而不是隱藏到系統匣。",
