@@ -33,6 +33,7 @@ const { blocking } = migration;
 const checkingAuth = ref(true);
 const appLocked = ref(false);
 const appLockUnavailable = ref(false);
+const appLockQuitError = ref("");
 const loginRequired = ref(false);
 const setupRequired = ref(false);
 const authFailed = ref(false);
@@ -119,7 +120,11 @@ async function retryUnlock() {
   await initialize();
 }
 async function quitFromLock() {
-  await requestAppClose();
+  try {
+    await requestAppClose();
+  } catch (error) {
+    appLockQuitError.value = error instanceof Error ? error.message : String(error);
+  }
 }
 onMounted(() => {
   void initializeLocale();
@@ -133,6 +138,7 @@ onUnmounted(() => authRequest?.abort());
   <div v-else-if="appLocked" data-app-lock>
     <p>{{ t("appLock.title") }}</p>
     <p v-if="appLockUnavailable">{{ t("appLock.unavailable") }}</p>
+    <p v-if="appLockQuitError" data-app-lock-quit-error>{{ appLockQuitError }}</p>
     <button type="button" data-app-lock-retry @click="retryUnlock">{{ t("appLock.retry") }}</button>
     <button type="button" data-app-lock-quit @click="quitFromLock">{{ t("appLock.quit") }}</button>
   </div>

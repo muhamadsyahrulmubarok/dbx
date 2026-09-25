@@ -40,8 +40,14 @@ impl AppLockGate {
 }
 
 pub fn allowed_while_locked(command: &str) -> bool {
-    matches!(command, "app_lock_status" | "app_lock_availability" | "app_lock_verify" | "app_lock_enable")
-        || crate::migration_gate::allowed_command(command)
+    matches!(
+        command,
+        "app_lock_status"
+            | "app_lock_availability"
+            | "app_lock_verify"
+            | "app_lock_enable"
+            | "request_app_close_from_window_controls"
+    ) || crate::migration_gate::allowed_command(command)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,10 +201,7 @@ mod tests {
         let wait = wait_until_connections_may_refresh(&migration, Some(&lock));
         tokio::pin!(wait);
 
-        assert!(
-            poll_now(wait.as_mut()).is_pending(),
-            "the wait must park on the lock while migration is still ready"
-        );
+        assert!(poll_now(wait.as_mut()).is_pending(), "the wait must park on the lock while migration is still ready");
         migration.set_ready(false);
         lock.unlock();
         assert!(

@@ -259,6 +259,19 @@ describe("startup boundary", () => {
     expect(mocks.migrationStatus).not.toHaveBeenCalled();
   });
 
+  it("shows a failed quit on the lock panel", async () => {
+    mocks.appLockStatus.mockResolvedValue({ enabled: true, locked: true });
+    mocks.appLockVerify.mockResolvedValue("canceled");
+    mocks.requestAppClose.mockRejectedValue(new Error("APP_LOCK_REQUIRED"));
+    await mountGate();
+    await vi.waitFor(() => expect(root.querySelector("[data-app-lock-quit]")).not.toBeNull());
+    (root.querySelector("[data-app-lock-quit]") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(root.textContent).toContain("APP_LOCK_REQUIRED"));
+    expect(root.querySelector("[data-app-lock]")).not.toBeNull();
+    expect(mocks.appImported).not.toHaveBeenCalled();
+    expect(mocks.migrationStatus).not.toHaveBeenCalled();
+  });
+
   it("cancels pending authentication when the gate unmounts", async () => {
     mocks.desktop.mockReturnValue(false);
     const fetchMock = vi.fn().mockReturnValue(new Promise(() => {}));

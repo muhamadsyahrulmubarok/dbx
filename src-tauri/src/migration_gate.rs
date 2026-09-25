@@ -161,6 +161,40 @@ mod tests {
         lock.unlock();
         assert!(get_ipc_response(&webview, request("load_connections")).is_ok());
     }
+    #[test]
+    fn invoke_dispatch_allows_window_close_while_locked() {
+        use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets};
+        let migration = Arc::new(MigrationGate::new(true));
+        let lock = Arc::new(crate::app_lock::AppLockGate::new(true));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let command_calls = calls.clone();
+        let app = mock_builder()
+            .manage(migration)
+            .manage(lock)
+            .invoke_handler(guard_handler(move |invoke| {
+                command_calls.fetch_add(1, Ordering::SeqCst);
+                invoke.resolver.resolve("dispatched");
+                true
+            }))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let request = |command: &str| tauri::webview::InvokeRequest {
+            cmd: command.into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: if cfg!(windows) { "http://tauri.localhost" } else { "tauri://localhost" }.parse().unwrap(),
+            body: tauri::ipc::InvokeBody::default(),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.into(),
+        };
+        assert!(get_ipc_response(&webview, request("request_app_close_from_window_controls")).is_ok());
+        assert_eq!(
+            get_ipc_response(&webview, request("load_connections")).unwrap_err(),
+            serde_json::json!("APP_LOCK_REQUIRED")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
     #[tokio::test]
     async fn wait_releases_only_after_ready() {
         let gate = MigrationGate::new(false);
