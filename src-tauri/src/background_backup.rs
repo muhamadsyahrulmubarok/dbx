@@ -8,17 +8,21 @@ use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
 
 pub struct BackgroundBackup {
-    pub service: BackupService,
+    service: OnceLock<BackupService>,
     data_dir: PathBuf,
     stop: CancellationToken,
-    worker: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    lease: PathBuf,
+    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    lease: Mutex<Option<PathBuf>>,
+    started: AtomicBool,
 }
 
 #[derive(Serialize)]
@@ -29,18 +33,37 @@ pub struct BackgroundStatus {
 }
 
 impl BackgroundBackup {
-    pub fn new(state: Arc<AppState>, data_dir: PathBuf) -> Result<Self, String> {
-        let service = BackupService::new(state, &data_dir, None);
-        let stop = CancellationToken::new();
-        let directory = data_dir.join("database-backups");
+    pub fn deferred(data_dir: PathBuf) -> Self {
+        Self {
+            service: OnceLock::new(),
+            data_dir,
+            stop: CancellationToken::new(),
+            worker: Mutex::new(None),
+            lease: Mutex::new(None),
+            started: AtomicBool::new(false),
+        }
+    }
+
+    pub fn start_worker(&self) -> Result<(), String> {
+        if self.started.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let directory = self.data_dir.join("database-backups");
         std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
         let lease = directory.join(format!("ui-{}.lease", uuid::Uuid::new_v4().simple()));
         std::fs::write(&lease, b"1").map_err(|e| e.to_string())?;
-        let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(error) => {
+                let _ = std::fs::remove_file(&lease);
+                return Err(error.to_string());
+            }
+        };
+        let mut command = Command::new(exe);
         command
             .arg("--ui-backup-worker")
             .arg("--data-dir")
-            .arg(&data_dir)
+            .arg(&self.data_dir)
             .arg("--ui-lease")
             .arg(&lease)
             .stdin(Stdio::null())
@@ -56,9 +79,15 @@ impl BackgroundBackup {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let mut child = command.spawn().map_err(|e| e.to_string())?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = std::fs::remove_file(&lease);
+                return Err(error.to_string());
+            }
+        };
         let heartbeat_lease = lease.clone();
-        let heartbeat_stop = stop.clone();
+        let heartbeat_stop = self.stop.clone();
         let worker = tokio::spawn(async move {
             loop {
                 tokio::select! { _ = heartbeat_stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(2)) => {} }
@@ -73,15 +102,33 @@ impl BackgroundBackup {
                 }
             }
         });
-        Ok(Self { service, data_dir, stop, worker: tokio::sync::Mutex::new(Some(worker)), lease })
+        {
+            let mut workers = self.worker.lock().unwrap_or_else(|error| error.into_inner());
+            let mut leases = self.lease.lock().unwrap_or_else(|error| error.into_inner());
+            *workers = Some(worker);
+            *leases = Some(lease);
+        }
+        self.started.store(true, Ordering::Release);
+        self.resume()
+    }
+
+    fn ensure_worker_started(&self) -> Result<(), String> {
+        if self.started.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err("APP_LOCK_REQUIRED".to_string())
+        }
     }
 
     pub async fn shutdown(&self) {
         self.stop.cancel();
-        if let Some(worker) = self.worker.lock().await.take() {
+        let worker = self.worker.lock().unwrap_or_else(|error| error.into_inner()).take();
+        if let Some(worker) = worker {
             let _ = tokio::time::timeout(Duration::from_secs(60), worker).await;
         }
-        let _ = tokio::fs::remove_file(&self.lease).await;
+        if let Some(lease) = self.lease.lock().unwrap_or_else(|error| error.into_inner()).take() {
+            let _ = tokio::fs::remove_file(lease).await;
+        }
     }
 
     pub fn resume(&self) -> Result<(), String> {
@@ -98,10 +145,14 @@ fn resume_registration(data_dir: &Path, register: impl FnOnce(&Path) -> Result<(
 
 #[tauri::command]
 pub async fn database_backup_command(
-    state: tauri::State<'_, BackgroundBackup>,
+    backups: tauri::State<'_, BackgroundBackup>,
+    app_state: tauri::State<'_, Arc<AppState>>,
     command: BackupCommand,
 ) -> Result<serde_json::Value, String> {
-    state.service.command(command).await
+    backups.ensure_worker_started()?;
+    let service =
+        backups.service.get_or_init(|| BackupService::new(Arc::clone(app_state.inner()), &backups.data_dir, None));
+    service.command(command).await
 }
 
 #[tauri::command]
@@ -425,6 +476,7 @@ pub fn run_if_requested() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{atomic::AtomicBool, Mutex, OnceLock};
 
     #[test]
     fn native_service_uses_the_current_binary() {
@@ -487,8 +539,6 @@ mod tests {
     #[tokio::test]
     async fn shutdown_stops_the_mock_supervisor_and_removes_only_its_lease() {
         let directory = tempfile::tempdir().unwrap();
-        let storage = dbx_core::persistence::test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
-        let state = Arc::new(AppState::new(storage));
         std::fs::create_dir_all(directory.path().join("database-backups")).unwrap();
         std::fs::write(marker(directory.path()), b"1").unwrap();
         let lease = directory.path().join("database-backups/ui-test.lease");
@@ -499,17 +549,27 @@ mod tests {
             supervisor_stop.cancelled().await;
         });
         let backup = BackgroundBackup {
-            service: BackupService::new(state, directory.path(), None),
+            service: OnceLock::new(),
             data_dir: directory.path().to_path_buf(),
             stop: stop.clone(),
-            worker: tokio::sync::Mutex::new(Some(worker)),
-            lease: lease.clone(),
+            worker: Mutex::new(Some(worker)),
+            lease: Mutex::new(Some(lease.clone())),
+            started: AtomicBool::new(true),
         };
         tokio::time::timeout(Duration::from_secs(2), backup.shutdown()).await.unwrap();
         backup.shutdown().await;
         assert!(stop.is_cancelled());
-        assert!(backup.worker.lock().await.is_none());
+        assert!(backup.worker.lock().unwrap().is_none());
         assert!(!lease.exists());
         assert!(marker(directory.path()).exists());
+    }
+
+    #[test]
+    fn deferred_backup_blocks_commands_and_does_not_spawn_a_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let backup = BackgroundBackup::deferred(directory.path().to_path_buf());
+        assert_eq!(backup.ensure_worker_started().unwrap_err(), "APP_LOCK_REQUIRED");
+        assert!(!directory.path().join("database-backups").exists());
+        assert!(backup.worker.lock().unwrap().is_none());
     }
 }

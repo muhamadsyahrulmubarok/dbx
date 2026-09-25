@@ -2,13 +2,13 @@ mod background_backup;
 mod commands;
 mod data_dir;
 pub use background_backup::run_if_requested as run_backup_worker_if_requested;
+mod app_lock;
 mod db;
+mod hello;
 #[cfg(target_os = "macos")]
 mod macos_app_delegate;
 #[cfg(target_os = "macos")]
 mod macos_escape_guard;
-mod app_lock;
-mod hello;
 mod migration_gate;
 mod models;
 mod plugin_ui_protocol;
@@ -684,14 +684,30 @@ pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ta
     let _ = app.emit(APP_CLOSE_REQUESTED_EVENT, target);
 }
 
+fn app_lock_is_held(app: &tauri::AppHandle) -> bool {
+    app.try_state::<Arc<app_lock::AppLockGate>>().map(|gate| gate.is_locked()).unwrap_or(true)
+}
+
+fn emit_queued_deep_links(app: &tauri::AppHandle, queued: &commands::deep_link::QueuedDeepLinks) {
+    if !queued.connection.is_empty() {
+        let _ = app.emit("dbx-open-connection-links", &queued.connection);
+    }
+    if !queued.ai_config.is_empty() {
+        let _ = app.emit("dbx-open-ai-config-links", &queued.ai_config);
+    }
+    if !queued.plugin_install.is_empty() {
+        let _ = app.emit("dbx-open-plugin-install-links", &queued.plugin_install);
+    }
+}
+
 fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
     if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_connection_links(links.clone());
+        let queued = state.stage_connection_links(links, app_lock_is_held(app));
+        emit_queued_deep_links(app, &queued);
     }
-    let _ = app.emit("dbx-open-connection-links", links);
     show_main_window(app);
 }
 
@@ -700,9 +716,9 @@ fn open_ai_config_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
         return;
     }
     if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_ai_config_links(links.clone());
+        let queued = state.stage_ai_config_links(links, app_lock_is_held(app));
+        emit_queued_deep_links(app, &queued);
     }
-    let _ = app.emit("dbx-open-ai-config-links", links);
     show_main_window(app);
 }
 
@@ -711,9 +727,9 @@ fn open_plugin_install_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
         return;
     }
     if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_plugin_install_links(links.clone());
+        let queued = state.stage_plugin_install_links(links, app_lock_is_held(app));
+        emit_queued_deep_links(app, &queued);
     }
-    let _ = app.emit("dbx-open-plugin-install-links", links);
     show_main_window(app);
 }
 
@@ -1692,27 +1708,10 @@ pub fn run() {
             let state = Arc::new(state);
             app.manage(state.clone());
             commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
-            let backups = tauri::async_runtime::block_on(async {
-                background_backup::BackgroundBackup::new(state.clone(), data_dir.clone())
-            });
-            match backups {
-                Ok(backups) => {
-                    if let Err(error) = backups.resume() {
-                        log::error!("[database-backup] background registration failed: {error}");
-                    }
-                    app.manage(backups);
-                }
-                Err(error) => log::error!("[database-backup] worker startup failed: {error}"),
-            }
+            app.manage(background_backup::BackgroundBackup::deferred(data_dir.clone()));
             let mcp_http_server = Arc::new(commands::mcp_http_server::McpHttpServerState::new(data_dir.clone()));
             app.manage(mcp_http_server.clone());
-            let mcp_http_state = state.clone();
-            let mcp_gate = migration_gate.clone();
-            tauri::async_runtime::spawn(async move {
-                mcp_gate.wait().await;
-                commands::mcp_http_server::start_if_enabled(mcp_http_state, mcp_http_server).await;
-            });
-            app.manage(commands::redis_pubsub_server::start_pubsub_server(state.clone()));
+            app.manage(commands::redis_pubsub_server::PubSubServerState::unavailable());
             app.manage(commands::saved_sql::SavedSqlStorageState { data_dir: data_dir.clone() });
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
             app.manage(commands::external_db::ExternalDbOpenState::default());
@@ -1729,16 +1728,51 @@ pub fn run() {
             webview2_recovery::install(app.handle());
             let startup_args: Vec<String> = std::env::args().skip(1).collect();
             let startup_links = commands::deep_link::connection_deep_links_from_args(&startup_args);
-            open_connection_deep_links(app.handle(), startup_links);
             let startup_ai_config_links = commands::deep_link::ai_config_deep_links_from_args(&startup_args);
-            open_ai_config_deep_links(app.handle(), startup_ai_config_links);
             let startup_plugin_install_links = commands::deep_link::plugin_install_deep_links_from_args(&startup_args);
-            open_plugin_install_deep_links(app.handle(), startup_plugin_install_links);
+            let has_startup_deep_links = !startup_links.is_empty()
+                || !startup_ai_config_links.is_empty()
+                || !startup_plugin_install_links.is_empty();
+            if let Some(deep_links) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
+                deep_links.push_connection_links(startup_links);
+                deep_links.push_ai_config_links(startup_ai_config_links);
+                deep_links.push_plugin_install_links(startup_plugin_install_links);
+            }
+            if has_startup_deep_links {
+                show_main_window(app.handle());
+            }
 
             let app_handle = app.handle().clone();
+            let deep_link_app = app_handle.clone();
+            let deep_link_lock = app_lock_gate.clone();
             tauri::async_runtime::spawn(async move {
-                migration_gate.wait().await;
-                commands::mcp_bridge::start(app_handle, state, data_dir);
+                deep_link_lock.wait_until_unlocked().await;
+                if let Some(deep_links) = deep_link_app.try_state::<commands::deep_link::DeepLinkOpenState>() {
+                    let queued = deep_links.release_queued_emits();
+                    emit_queued_deep_links(&deep_link_app, &queued);
+                }
+            });
+            let services_state = state.clone();
+            let services_dir = data_dir.clone();
+            let services_migration = migration_gate.clone();
+            let services_lock = app_lock_gate.clone();
+            let services_http = mcp_http_server.clone();
+            tauri::async_runtime::spawn(async move {
+                services_migration.wait().await;
+                services_lock.wait_until_unlocked().await;
+                if !app_lock::background_services_may_start(services_migration.is_ready(), services_lock.is_locked()) {
+                    return;
+                }
+                if let Some(backups) = app_handle.try_state::<background_backup::BackgroundBackup>() {
+                    if let Err(error) = backups.start_worker() {
+                        log::error!("[database-backup] worker startup failed: {error}");
+                    }
+                }
+                if let Some(pubsub) = app_handle.try_state::<commands::redis_pubsub_server::PubSubServerState>() {
+                    pubsub.start_if_stopped(services_state.clone());
+                }
+                commands::mcp_http_server::start_if_enabled(services_state.clone(), services_http).await;
+                commands::mcp_bridge::start(app_handle, services_state, services_dir);
             });
             eprintln!("[STARTUP] setup complete in {:?} (total {:?})", setup_start.elapsed(), startup_begin.elapsed());
             append_startup_probe(format!(

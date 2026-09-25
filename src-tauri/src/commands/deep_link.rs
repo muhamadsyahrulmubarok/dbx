@@ -22,50 +22,111 @@ pub fn pending_open_plugin_install_links(state: tauri::State<'_, DeepLinkOpenSta
 }
 
 #[derive(Default)]
+struct DeepLinkQueues {
+    connection: Vec<String>,
+    ai_config: Vec<String>,
+    plugin_install: Vec<String>,
+    released: bool,
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct QueuedDeepLinks {
+    pub connection: Vec<String>,
+    pub ai_config: Vec<String>,
+    pub plugin_install: Vec<String>,
+}
+
+enum DeepLinkKind {
+    Connection,
+    AiConfig,
+    PluginInstall,
+}
+
+#[derive(Default)]
 pub struct DeepLinkOpenState {
-    pending_connection_links: Mutex<Vec<String>>,
-    pending_ai_config_links: Mutex<Vec<String>>,
-    pending_plugin_install_links: Mutex<Vec<String>>,
+    queues: Mutex<DeepLinkQueues>,
 }
 
 impl DeepLinkOpenState {
+    fn lock(&self) -> std::sync::MutexGuard<'_, DeepLinkQueues> {
+        self.queues.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
     pub fn push_connection_links(&self, links: Vec<String>) {
-        if links.is_empty() {
-            return;
-        }
-        if let Ok(mut pending) = self.pending_connection_links.lock() {
-            pending.extend(links);
-        }
+        let _ = self.stage(DeepLinkKind::Connection, links, true);
     }
 
     pub fn push_ai_config_links(&self, links: Vec<String>) {
-        if links.is_empty() {
-            return;
-        }
-        if let Ok(mut pending) = self.pending_ai_config_links.lock() {
-            pending.extend(links);
-        }
+        let _ = self.stage(DeepLinkKind::AiConfig, links, true);
     }
 
     pub fn push_plugin_install_links(&self, links: Vec<String>) {
-        if links.is_empty() {
-            return;
+        let _ = self.stage(DeepLinkKind::PluginInstall, links, true);
+    }
+
+    pub(crate) fn stage_connection_links(&self, links: Vec<String>, locked: bool) -> QueuedDeepLinks {
+        self.stage(DeepLinkKind::Connection, links, locked)
+    }
+
+    pub(crate) fn stage_ai_config_links(&self, links: Vec<String>, locked: bool) -> QueuedDeepLinks {
+        self.stage(DeepLinkKind::AiConfig, links, locked)
+    }
+
+    pub(crate) fn stage_plugin_install_links(&self, links: Vec<String>, locked: bool) -> QueuedDeepLinks {
+        self.stage(DeepLinkKind::PluginInstall, links, locked)
+    }
+
+    pub(crate) fn release_queued_emits(&self) -> QueuedDeepLinks {
+        let mut queues = self.lock();
+        if queues.released {
+            return QueuedDeepLinks::default();
         }
-        if let Ok(mut pending) = self.pending_plugin_install_links.lock() {
-            pending.extend(links);
+        queues.released = true;
+        Self::snapshot(&queues)
+    }
+
+    fn stage(&self, kind: DeepLinkKind, links: Vec<String>, locked: bool) -> QueuedDeepLinks {
+        if links.is_empty() {
+            return QueuedDeepLinks::default();
+        }
+        let mut queues = self.lock();
+        match kind {
+            DeepLinkKind::Connection => queues.connection.extend(links.iter().cloned()),
+            DeepLinkKind::AiConfig => queues.ai_config.extend(links.iter().cloned()),
+            DeepLinkKind::PluginInstall => queues.plugin_install.extend(links.iter().cloned()),
+        }
+        if locked && !queues.released {
+            return QueuedDeepLinks::default();
+        }
+        if !queues.released {
+            queues.released = true;
+            return Self::snapshot(&queues);
+        }
+        match kind {
+            DeepLinkKind::Connection => QueuedDeepLinks { connection: links, ..QueuedDeepLinks::default() },
+            DeepLinkKind::AiConfig => QueuedDeepLinks { ai_config: links, ..QueuedDeepLinks::default() },
+            DeepLinkKind::PluginInstall => QueuedDeepLinks { plugin_install: links, ..QueuedDeepLinks::default() },
+        }
+    }
+
+    fn snapshot(queues: &DeepLinkQueues) -> QueuedDeepLinks {
+        QueuedDeepLinks {
+            connection: queues.connection.clone(),
+            ai_config: queues.ai_config.clone(),
+            plugin_install: queues.plugin_install.clone(),
         }
     }
 
     fn drain_connection_links(&self) -> Vec<String> {
-        self.pending_connection_links.lock().map(|mut pending| pending.drain(..).collect()).unwrap_or_default()
+        std::mem::take(&mut self.lock().connection)
     }
 
     fn drain_ai_config_links(&self) -> Vec<String> {
-        self.pending_ai_config_links.lock().map(|mut pending| pending.drain(..).collect()).unwrap_or_default()
+        std::mem::take(&mut self.lock().ai_config)
     }
 
     fn drain_plugin_install_links(&self) -> Vec<String> {
-        self.pending_plugin_install_links.lock().map(|mut pending| pending.drain(..).collect()).unwrap_or_default()
+        std::mem::take(&mut self.lock().plugin_install)
     }
 }
 
@@ -219,6 +280,27 @@ mod tests {
                 "dbx://connection/new?type=mysql".to_string(),
             ]),
             vec!["dbx://connection/new?type=mysql", "dbx://connection/new?type=postgres"]
+        );
+    }
+
+    #[test]
+    fn holds_events_until_release_then_emits_each_link_once() {
+        let state = DeepLinkOpenState::default();
+        let held = state.stage_connection_links(vec!["dbx://connection/new?type=mysql".to_string()], true);
+        assert_eq!(held, QueuedDeepLinks::default());
+        state.push_ai_config_links(vec!["dbx://settings/ai/new?provider=openai-compatible".to_string()]);
+
+        let queued = state.release_queued_emits();
+        assert_eq!(queued.connection, vec!["dbx://connection/new?type=mysql"]);
+        assert_eq!(queued.ai_config, vec!["dbx://settings/ai/new?provider=openai-compatible"]);
+        assert!(state.release_queued_emits().connection.is_empty());
+
+        let live = state.stage_connection_links(vec!["dbx://connection/new?type=postgres".to_string()], false);
+        assert_eq!(live.connection, vec!["dbx://connection/new?type=postgres"]);
+        assert!(live.ai_config.is_empty());
+        assert_eq!(
+            state.drain_connection_links(),
+            vec!["dbx://connection/new?type=mysql".to_string(), "dbx://connection/new?type=postgres".to_string()]
         );
     }
 }

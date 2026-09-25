@@ -40,13 +40,8 @@ impl AppLockGate {
 }
 
 pub fn allowed_while_locked(command: &str) -> bool {
-    matches!(
-        command,
-        "app_lock_status"
-            | "app_lock_availability"
-            | "app_lock_verify"
-            | "app_lock_enable"
-    ) || crate::migration_gate::allowed_command(command)
+    matches!(command, "app_lock_status" | "app_lock_availability" | "app_lock_verify" | "app_lock_enable")
+        || crate::migration_gate::allowed_command(command)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +63,10 @@ pub fn load_config(data_dir: &Path) -> AppLockConfig {
         return AppLockConfig { enabled: false };
     };
     serde_json::from_slice(&bytes).unwrap_or(AppLockConfig { enabled: false })
+}
+
+pub fn background_services_may_start(migration_ready: bool, locked: bool) -> bool {
+    migration_ready && !locked
 }
 
 pub fn save_config(data_dir: &Path, config: &AppLockConfig) -> Result<(), String> {
@@ -95,6 +94,13 @@ mod tests {
     #[test]
     fn disabled_gate_starts_unlocked() {
         assert!(!AppLockGate::new(false).is_locked());
+    }
+
+    #[test]
+    fn background_services_wait_for_both_gates() {
+        assert!(!background_services_may_start(false, false));
+        assert!(!background_services_may_start(true, true));
+        assert!(background_services_may_start(true, false));
     }
 
     #[test]

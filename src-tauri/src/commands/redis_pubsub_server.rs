@@ -18,18 +18,65 @@ use dbx_core::connection::AppState;
 const DEFAULT_PUBSUB_PORT: u16 = 4224;
 
 pub struct PubSubServerState {
-    port: Option<u16>,
+    port: Mutex<Option<u16>>,
     shutdown: CancellationToken,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl PubSubServerState {
-    fn unavailable() -> Self {
-        Self { port: None, shutdown: CancellationToken::new(), task: Mutex::new(None) }
+    pub fn unavailable() -> Self {
+        Self { port: Mutex::new(None), shutdown: CancellationToken::new(), task: Mutex::new(None) }
+    }
+
+    pub fn start_if_stopped(&self, state: Arc<AppState>) {
+        let mut port = self.port.lock().unwrap_or_else(|error| error.into_inner());
+        if port.is_some() {
+            return;
+        }
+        let router = build_pubsub_router(state);
+        let listener = match bind_pubsub_listener(pubsub_server_port()) {
+            Ok(listener) => listener,
+            Err(error) => {
+                log::warn!("{error}");
+                return;
+            }
+        };
+        let addr = match listener.local_addr() {
+            Ok(addr) => addr,
+            Err(error) => {
+                log::warn!("Failed to read PubSub server address: {error}");
+                return;
+            }
+        };
+        if let Err(error) = listener.set_nonblocking(true) {
+            log::warn!("Failed to configure PubSub server listener: {error}");
+            return;
+        }
+        let shutdown_signal = self.shutdown.clone();
+        let task = tauri::async_runtime::spawn(async move {
+            let listener = match tokio::net::TcpListener::from_std(listener) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    log::warn!("Failed to start PubSub server on {addr}: {error}");
+                    return;
+                }
+            };
+            log::info!("PubSub WebSocket server listening on {addr}");
+            if let Err(error) =
+                axum::serve(listener, router).with_graceful_shutdown(shutdown_signal.cancelled_owned()).await
+            {
+                log::warn!("PubSub server stopped with error: {error}");
+            }
+        });
+        *port = Some(addr.port());
+        *self.task.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
     }
 
     fn get(&self) -> Result<u16, String> {
-        self.port.ok_or_else(|| "Redis PubSub server is unavailable".to_string())
+        self.port
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .ok_or_else(|| "Redis PubSub server is unavailable".to_string())
     }
 
     pub async fn shutdown(&self, deadline: Duration) {
@@ -249,32 +296,6 @@ async fn handle_command(sink: &mut redis::aio::PubSubSink, text: &str) -> Result
     Ok(())
 }
 
-/// Start the embedded web server for PubSub WebSocket support.
-/// Runs on a background task using the shared AppState.
-pub fn start_pubsub_server(state: Arc<AppState>) -> PubSubServerState {
-    let router = build_pubsub_router(state);
-    let listener = match bind_pubsub_listener(pubsub_server_port()) {
-        Ok(listener) => listener,
-        Err(error) => {
-            log::warn!("{error}");
-            return PubSubServerState::unavailable();
-        }
-    };
-    let addr = match listener.local_addr() {
-        Ok(addr) => addr,
-        Err(error) => {
-            log::warn!("Failed to read PubSub server address: {error}");
-            return PubSubServerState::unavailable();
-        }
-    };
-    if let Err(error) = listener.set_nonblocking(true) {
-        log::warn!("Failed to configure PubSub server listener: {error}");
-        return PubSubServerState::unavailable();
-    }
-
-    start_pubsub_server_with_listener(listener, addr, router)
-}
-
 fn start_pubsub_server_with_listener(
     listener: TcpListener,
     addr: std::net::SocketAddr,
@@ -298,7 +319,7 @@ fn start_pubsub_server_with_listener(
         }
     });
 
-    PubSubServerState { port: Some(addr.port()), shutdown, task: Mutex::new(Some(task)) }
+    PubSubServerState { port: Mutex::new(Some(addr.port())), shutdown, task: Mutex::new(Some(task)) }
 }
 
 #[cfg(test)]
@@ -306,6 +327,7 @@ mod tests {
     use super::{bind_pubsub_listener, start_pubsub_server_with_listener};
     use axum::Router;
     use std::net::{Ipv4Addr, TcpListener};
+    use std::sync::Arc;
     use std::time::Duration;
 
     #[test]
@@ -330,5 +352,21 @@ mod tests {
 
         let rebound = TcpListener::bind(addr).unwrap();
         assert_eq!(rebound.local_addr().unwrap(), addr);
+    }
+
+    #[tokio::test]
+    async fn start_if_stopped_binds_only_while_the_port_is_unset() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
+        let app_state = Arc::new(dbx_core::connection::AppState::new(storage));
+        let server = super::PubSubServerState::unavailable();
+
+        assert!(server.get().is_err());
+        server.start_if_stopped(Arc::clone(&app_state));
+        let port = server.get().unwrap();
+        server.start_if_stopped(app_state);
+        assert_eq!(server.get().unwrap(), port);
+
+        server.shutdown(Duration::from_secs(1)).await;
     }
 }
