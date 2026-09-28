@@ -55,27 +55,29 @@ pub async fn request_verification(app: &tauri::AppHandle) -> HelloPrompt {
     use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
     use windows_future::IAsyncOperation;
 
-    let hwnd = {
+    // The COM interop pointer is not Send. Create the operation, then drop every
+    // non-Send value before awaiting. IAsyncOperation itself is Send, which is
+    // what Tauri requires of a command future.
+    let operation: IAsyncOperation<UserConsentVerificationResult> = {
         let Some(window) = app.get_webview_window("main") else {
             return HelloPrompt::Unavailable;
         };
-        match window.hwnd() {
+        let hwnd = match window.hwnd() {
             Ok(hwnd) if !hwnd.is_invalid() => hwnd,
             _ => return HelloPrompt::Unavailable,
-        }
-    };
-
-    let interop = match windows::core::factory::<UserConsentVerifier, IUserConsentVerifierInterop>() {
-        Ok(interop) => interop,
-        Err(error) => return prompt_from_hresult(error.code().0),
-    };
-
-    // SAFETY: `hwnd` is the process main window, and this is the documented Win32 interop for UserConsentVerifier.
-    let operation: IAsyncOperation<UserConsentVerificationResult> =
-        match unsafe { interop.RequestVerificationForWindowAsync(hwnd, &HSTRING::from("Unlock DBX")) } {
-            Ok(operation) => operation,
+        };
+        let interop = match windows::core::factory::<UserConsentVerifier, IUserConsentVerifierInterop>() {
+            Ok(interop) => interop,
             Err(error) => return prompt_from_hresult(error.code().0),
         };
+        // SAFETY: `hwnd` is the process main window, and this is the documented Win32 interop for UserConsentVerifier.
+        let started = unsafe { interop.RequestVerificationForWindowAsync(hwnd, &HSTRING::from("Unlock DBX")) };
+        drop(interop);
+        match started {
+            Ok(operation) => operation,
+            Err(error) => return prompt_from_hresult(error.code().0),
+        }
+    };
 
     match operation.await {
         Ok(UserConsentVerificationResult::Verified) => HelloPrompt::Verified,
