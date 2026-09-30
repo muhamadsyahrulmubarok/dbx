@@ -190,6 +190,8 @@ const props = defineProps<{
   catalog?: string;
   schema?: string;
   tableName: string;
+  /** `view` loads `CREATE OR REPLACE VIEW` instead of table DDL. */
+  tableType?: "table" | "view";
   initialTab?: TableInfoTab;
   initialTabRequestId?: number;
   initialTarget?: TableStructureEditorTarget;
@@ -438,6 +440,7 @@ function ddlRequest() {
     schema: metadataSchema.value,
     tableName: props.tableName,
     catalog: props.catalog,
+    objectType: props.tableType === "view" ? ("VIEW" as const) : undefined,
   };
 }
 
