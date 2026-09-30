@@ -3079,6 +3079,7 @@ defineExpose({
           :catalog="activeTab.catalog"
           :schema="activeTab.schema"
           :table-name="activeTab.structureTableName || ''"
+          :table-type="activeTab.structureTableType"
           :initial-tab="activeTab.structureInitialTab"
           :initial-tab-request-id="activeTab.structureInitialTabRequestId"
           :initial-target="activeTab.structureInitialTarget"
