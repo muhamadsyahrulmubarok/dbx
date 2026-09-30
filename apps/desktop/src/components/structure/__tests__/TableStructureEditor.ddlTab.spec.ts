@@ -418,16 +418,16 @@ afterEach(() => {
 
 describe("TableStructureEditor DDL tab", () => {
   it("loads CREATE OR REPLACE VIEW ddl when editing a view", async () => {
-    const viewDdl = "CREATE OR REPLACE VIEW `view_akses_readbuttons` AS\nSELECT id FROM akses_readbuttons;";
+    const viewDdl = "CREATE OR REPLACE VIEW `active_users` AS\nSELECT id FROM users;";
     mocks.loadObjectDdl.mockResolvedValue({ ddl: viewDdl, cacheStatus: "remote" });
 
-    const root = await mountStructureEditor({ database: "app", schema: "app", tableName: "view_akses_readbuttons", tableType: "view" });
+    const root = await mountStructureEditor({ database: "app", schema: "app", tableName: "active_users", tableType: "view" });
     await clickTab(root, "ddl");
     await vi.waitFor(() => expect(ddlEditorText(root)).toContain("CREATE OR REPLACE VIEW"), { timeout: 3000 });
 
-    expect(ddlEditorText(root)).toContain("`view_akses_readbuttons`");
+    expect(ddlEditorText(root)).toContain("`active_users`");
     expect(ddlEditorText(root)).not.toContain("CREATE TABLE");
-    expect(mocks.loadObjectDdl).toHaveBeenCalledWith(expect.objectContaining({ tableName: "view_akses_readbuttons", objectType: "VIEW" }), expect.anything());
+    expect(mocks.loadObjectDdl).toHaveBeenCalledWith(expect.objectContaining({ tableName: "active_users", objectType: "VIEW" }), expect.anything());
   });
 
   it("keeps the DDL rendered when the tab is left and revisited", async () => {

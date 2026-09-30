@@ -1944,12 +1944,12 @@ mod tests {
         let sql = build_view_ddl_sql(BuildViewDdlInput {
             database_type: Some(DatabaseType::Mysql),
             schema: Some("app".to_string()),
-            name: "view_akses_readbuttons".to_string(),
-            source: "SELECT id FROM akses_readbuttons".to_string(),
+            name: "active_users".to_string(),
+            source: "SELECT id FROM users".to_string(),
             identifier_quote: None,
         });
 
-        assert_eq!(sql, "CREATE OR REPLACE VIEW `view_akses_readbuttons` AS\nSELECT id FROM akses_readbuttons;");
+        assert_eq!(sql, "CREATE OR REPLACE VIEW `active_users` AS\nSELECT id FROM users;");
     }
 
     #[test]
@@ -1957,15 +1957,15 @@ mod tests {
         let sql = build_view_ddl_sql(BuildViewDdlInput {
             database_type: Some(DatabaseType::Mysql),
             schema: Some("app".to_string()),
-            name: "view_akses_readbuttons".to_string(),
-            source: "CREATE ALGORITHM=UNDEFINED DEFINER=`hr`@`%` SQL SECURITY DEFINER VIEW `app`.`view_akses_readbuttons` AS select `id` from `akses`"
+            name: "active_users".to_string(),
+            source: "CREATE ALGORITHM=UNDEFINED DEFINER=`hr`@`%` SQL SECURITY DEFINER VIEW `app`.`active_users` AS select `id` from `users`"
                 .to_string(),
             identifier_quote: None,
         });
 
         assert_eq!(
             sql,
-            "CREATE OR REPLACE ALGORITHM=UNDEFINED DEFINER=`hr`@`%` SQL SECURITY DEFINER VIEW `view_akses_readbuttons` AS select `id` from `akses`;"
+            "CREATE OR REPLACE ALGORITHM=UNDEFINED DEFINER=`hr`@`%` SQL SECURITY DEFINER VIEW `active_users` AS select `id` from `users`;"
         );
     }
 
