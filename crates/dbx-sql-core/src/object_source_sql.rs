@@ -1949,10 +1949,7 @@ mod tests {
             identifier_quote: None,
         });
 
-        assert_eq!(
-            sql,
-            "CREATE OR REPLACE VIEW `view_akses_readbuttons` AS\nSELECT id FROM akses_readbuttons;"
-        );
+        assert_eq!(sql, "CREATE OR REPLACE VIEW `view_akses_readbuttons` AS\nSELECT id FROM akses_readbuttons;");
     }
 
     #[test]
