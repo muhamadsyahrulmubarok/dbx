@@ -5726,6 +5726,10 @@ export default withEnglishFallback({
     keySearchHistory: "検索履歴",
     keySearchHistoryForget: "履歴から削除",
     keySearchHistoryEmpty: "履歴はありません",
+    downloadValue: "完全な値をダウンロード",
+    downloadValueFileType: "Redis 値",
+    downloadValueTextFileType: "テキストファイル",
+    downloadValueSuccess: "Redis 値をダウンロードしました",
   },
   mongo: {
     documents: "{count}ドキュメント",
@@ -9281,6 +9285,7 @@ export default withEnglishFallback({
   },
   sqlFileTree: {
     title: "SQL ファイル",
+    storageHelp: "「フォルダを開く」で開いたディスク上の実際の.sqlファイルを表示し、編集内容は元のファイルに直接保存されます。",
     openFolder: "フォルダを開く",
     closePanel: "閉じる",
     loading: "読み込み中...",

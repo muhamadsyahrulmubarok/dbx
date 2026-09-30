@@ -5361,6 +5361,10 @@ export default withEnglishFallback({
     keySearchHistory: "검색 기록",
     keySearchHistoryForget: "기록에서 제거",
     keySearchHistoryEmpty: "검색 기록이 없습니다",
+    downloadValue: "전체 값 다운로드",
+    downloadValueFileType: "Redis 값",
+    downloadValueTextFileType: "텍스트 파일",
+    downloadValueSuccess: "Redis 값이 다운로드됨",
   },
   mongo: {
     documents: "문서 {count}개",
@@ -6373,6 +6377,7 @@ export default withEnglishFallback({
   },
   sqlFileTree: {
     title: "SQL 파일",
+    storageHelp: "폴더 열기로 연 디스크의 실제 .sql 파일을 표시하며, 편집 내용은 원본 파일에 바로 저장됩니다.",
     openFolder: "폴더 열기",
     closePanel: "닫기",
     loading: "불러오는 중...",

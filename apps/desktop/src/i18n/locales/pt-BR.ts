@@ -5700,6 +5700,10 @@ export default withEnglishFallback({
     keySearchHistory: "Histórico de pesquisa",
     keySearchHistoryForget: "Remover do histórico",
     keySearchHistoryEmpty: "Nenhum histórico",
+    downloadValue: "Baixar valor completo",
+    downloadValueFileType: "Valor Redis",
+    downloadValueTextFileType: "Arquivo de texto",
+    downloadValueSuccess: "Valor Redis baixado",
   },
   mongo: {
     documents: "{count} documentos",
@@ -9240,6 +9244,7 @@ export default withEnglishFallback({
   },
   sqlFileTree: {
     title: "Arquivos SQL",
+    storageHelp: "São os arquivos .sql reais no disco abertos com Abrir pasta; as edições são salvas diretamente no arquivo original.",
     openFolder: "Abrir pasta",
     closePanel: "Fechar",
     loading: "Carregando...",
