@@ -325,10 +325,12 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Kyuubi
             | DatabaseType::Impala
             | DatabaseType::Argo
+            | DatabaseType::Transwarp
             | DatabaseType::Spark
             | DatabaseType::Db2
             | DatabaseType::Informix
             | DatabaseType::Neo4j
+            | DatabaseType::Nebula
             | DatabaseType::Cassandra
             | DatabaseType::Bigquery
             | DatabaseType::Spanner
@@ -2177,6 +2179,12 @@ impl AppState {
                     match result {
                         Ok(Ok(())) => {}
                         Ok(Err(err)) => {
+                            if !keepalive_failure_proves_pool_dead(&err.to_string()) {
+                                log::debug!(
+                                    "Connection keepalive for '{key}' could not check out a connection; keeping the busy pool: {err}"
+                                );
+                                continue;
+                            }
                             log::warn!("Connection keepalive failed for '{key}': {err}; invalidating pool");
                             let replace_runtime =
                                 err.recovery_decision().is_some_and(RecoveryDecision::replaces_runtime);
@@ -2623,10 +2631,12 @@ impl AppState {
                 PoolKind::Postgres(pg_pool)
             }
             DatabaseType::Sqlite => {
-                if db::sqlite_worker::sqlite_ssh_worker_requested(&db_config) {
+                if db::sqlite_worker::sqlite_remote_worker_requested(&db_config) {
                     let transport_layers = self.resolved_transport_layers(&db_config).await?;
                     let worker = db::sqlite_worker::connect_sqlite_worker(
                         &self.tunnels,
+                        &self.proxy_tunnels,
+                        &self.http_tunnels,
                         &self.agent_manager,
                         self.storage.data_dir(),
                         connection_id,
@@ -3423,7 +3433,7 @@ impl AppState {
         config: &ConnectionConfig,
     ) -> Result<ConnectionEndpoint, String> {
         let transport_layers = self.resolved_transport_layers(config).await?;
-        if transport_layers.is_empty() || db::sqlite_worker::sqlite_ssh_worker_requested(config) {
+        if transport_layers.is_empty() || db::sqlite_worker::sqlite_remote_worker_requested(config) {
             return Ok(ConnectionEndpoint::direct(config.host.clone(), config.port));
         }
         if config.uses_oracle_tns() {
@@ -5248,6 +5258,8 @@ impl AppState {
         self.http_tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
         let sqlite_worker_prefix = db::sqlite_worker::sqlite_worker_chain_id(connection_id);
         self.tunnels.stop_tunnels_with_prefix(&sqlite_worker_prefix).await;
+        self.proxy_tunnels.stop_tunnels_with_prefix(&sqlite_worker_prefix).await;
+        self.http_tunnels.stop_tunnels_with_prefix(&sqlite_worker_prefix).await;
         db::transport_layer_tunnel::stop_transport_layers(
             connection_id,
             layer_count,
@@ -5931,6 +5943,18 @@ impl From<String> for KeepaliveError {
     }
 }
 
+/// Whether a failed keepalive probe is evidence that the pool is dead.
+///
+/// A probe that ran out of its checkout budget because every connection is in use reports
+/// pool saturation, which says nothing about the health of the pooled connections. That is
+/// the normal state of a session-scoped pool (a single connection) while a batch import or
+/// transfer holds a long transaction on it. Invalidating the pool there used to abort the
+/// running operation with "Connection not found for transaction" instead of letting it
+/// finish. Every other probe failure keeps the invalidate-and-reconnect behaviour.
+fn keepalive_failure_proves_pool_dead(error: &str) -> bool {
+    !crate::query::is_pool_saturation_error(error)
+}
+
 impl KeepaliveTarget {
     fn matches_pool(&self, pool: &PoolKind) -> bool {
         match (self, pool) {
@@ -6354,22 +6378,26 @@ fn session_scoped_pool_key_for(
 
 /// 两个运行态连接配置是否视为同一连接（用于决定是否销毁连接池）。
 ///
-/// 仅当双方都是 `save_password=false` 时才忽略 `password` 字段的差异：这类连接
-/// 在 connect 时运行态配置可能携带会话密码，持久化同步后为空，这种空值差异不应
-/// 触发池重建。若任一方 `save_password=true`，密码是真实的连接参数，任何密码变更
-/// （包括用户保存了新密码）都必须销毁旧池，否则旧池会继续用旧密码认证。
+/// 始终忽略只影响前端导航的表加载策略。仅当双方都是 `save_password=false` 时才忽略
+/// `password` 字段的差异：这类连接在 connect 时运行态配置可能携带会话密码，持久化
+/// 同步后为空，这种空值差异不应触发池重建。若任一方 `save_password=true`，密码是
+/// 真实的连接参数，任何密码变更（包括用户保存了新密码）都必须销毁旧池，否则旧池会
+/// 继续用旧密码认证。
 pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionConfig) -> bool {
     if a == b {
         return true;
     }
+    let mut a = a.clone();
+    let mut b = b.clone();
+    // Sidebar paging is a presentation preference and cannot change an
+    // established database session.
+    a.sidebar_auto_load_all_tables = false;
+    b.sidebar_auto_load_all_tables = false;
     if !a.save_password && !b.save_password {
-        let mut a = a.clone();
         a.password.clear();
-        let mut b = b.clone();
         b.password.clear();
-        return a == b;
     }
-    false
+    a == b
 }
 
 /// Whether transient credentials can safely survive a persisted config update.
@@ -6389,6 +6417,7 @@ pub fn connection_configs_session_credentials_compatible(a: &ConnectionConfig, b
         config.visible_databases = None;
         config.visible_schemas = None;
         config.show_system_schemas = false;
+        config.sidebar_auto_load_all_tables = false;
         config.color = None;
         config.docs_notes_path = None;
         config.connect_timeout_secs = 0;
@@ -6903,8 +6932,8 @@ mod tests {
         connection_probe_endpoints, connection_remote_endpoint, connection_url_for_endpoint,
         database_connection_config, database_connection_config_with_catalog,
         gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
-        kafka_single_loopback_bootstrap_endpoint, metadata_connection_config, metadata_pool_database,
-        mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
+        kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead, metadata_connection_config,
+        metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
         prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
         redis_sentinel_transport_prefix, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
         sqlserver_uses_legacy_driver, task_client_session_id, transport_layers_through_last_ssh,
@@ -6949,6 +6978,7 @@ mod tests {
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -7042,6 +7072,16 @@ mod tests {
         let mut c = a.clone();
         c.password = "changed-secret".to_string();
         assert!(connection_configs_pool_equivalent(&a, &c));
+    }
+
+    #[test]
+    fn connection_configs_pool_equivalent_ignores_sidebar_table_loading_preference() {
+        let a = mysql_config(None);
+        let mut b = a.clone();
+        b.sidebar_auto_load_all_tables = true;
+
+        assert!(connection_configs_pool_equivalent(&a, &b));
+        assert!(connection_configs_pool_equivalent(&b, &a));
     }
 
     #[test]
@@ -8324,6 +8364,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn keepalive_probe_keeps_a_busy_pool_but_invalidates_a_dead_one() {
+        // Every connection is checked out: the probe learned nothing about pool health, so the
+        // pool must survive. Invalidating it here aborts whatever holds the connection — a
+        // truncate import reports "Connection not found for transaction" on its next chunk.
+        assert!(!keepalive_failure_proves_pool_dead(
+            "MySQL connection pool checkout timed out [stage=wait, timeout_ms=10000]"
+        ));
+        // A checkout failure while creating a connection is still evidence the pool is dead.
+        assert!(keepalive_failure_proves_pool_dead(
+            "MySQL connection pool checkout failed [stage=create]: connection refused"
+        ));
+        assert!(keepalive_failure_proves_pool_dead(
+            "MySQL connection pool checkout timed out [stage=create, timeout_ms=10000]"
+        ));
+    }
+
     #[tokio::test]
     async fn jdbc_plugin_env_uses_managed_jre_when_installed() {
         let dir = std::env::temp_dir().join(format!("dbx-core-jdbc-managed-jre-{}", uuid::Uuid::new_v4()));
@@ -8631,6 +8688,21 @@ mod tests {
         let scoped = database_connection_config(&config, Some("analytics"));
 
         assert_eq!(scoped.database.as_deref(), Some("ORCL"));
+    }
+
+    #[test]
+    fn connection_root_schema_databases_keep_the_configured_database() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::Dameng, DatabaseType::OceanbaseOracle] {
+            let mut config = mysql_config(Some("tenant_service"));
+            config.db_type = database_type;
+
+            let scoped = database_connection_config(&config, Some("APP"));
+
+            assert_eq!(scoped.database.as_deref(), Some("tenant_service"));
+        }
+
+        let mysql = database_connection_config(&mysql_config(Some("tenant_service")), Some("analytics"));
+        assert_eq!(mysql.database.as_deref(), Some("analytics"));
     }
 
     #[test]

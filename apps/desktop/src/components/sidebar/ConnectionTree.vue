@@ -25,8 +25,9 @@ import {
   localTableSearchParentTypes,
 } from "@/lib/sidebar/sidebarSearchTree";
 import { createSidebarLabelMatcher } from "@/lib/sidebar/sidebarSearch";
-import { collectSidebarRegexIndexScopes, resolveSidebarRemoteSearchQuery, resolveSidebarSearchDispatchMode } from "@/lib/sidebar/sidebarRegexSearchIndex";
+import { collectSidebarRegexIndexScopes, resolveSidebarRemoteSearchQuery, resolveSidebarSearchDispatchMode, shouldRestoreTrackedSidebarSearchTargetsInRegexMode } from "@/lib/sidebar/sidebarRegexSearchIndex";
 import { needsSidebarObjectGroupDiscovery } from "@/lib/sidebar/sidebarSearchDiscovery";
+import { isSidebarSearchPrunedDatabaseNode, resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 import { createSidebarSearchExpansionState } from "@/lib/sidebar/sidebarSearchExpansionState";
 import { createSidebarSearchLoadingTracker } from "@/lib/sidebar/sidebarSearchLoadingTracker";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -301,7 +302,10 @@ watch([deferredSearchQuery, regexMode], ([newQuery, isRegexMode], [oldQuery, was
   if (dispatchMode === "regex") {
     // Regex search is a read-only projection over live nodes and the local
     // table index. It must never trigger ensureConnected/listTables.
-    const restoreTasks = restoreTrackedSearchTargets();
+    // Keep results already loaded by an ordinary query until the regex is
+    // cleared. Restoring them here can empty the tree when this connection has
+    // no complete local table index yet (for example: "user" -> Regex mode).
+    const restoreTasks = shouldRestoreTrackedSidebarSearchTargetsInRegexMode(newQuery) ? restoreTrackedSearchTargets() : [];
     const searchGeneration = sidebarSearchLoadingTracker.begin();
     isSidebarSearchLoading.value = true;
     void Promise.allSettled([loadRegexTableSearchIndexes(), runSidebarSearchTasks(restoreTasks)])
@@ -384,9 +388,16 @@ async function loadSidebarSearchTargets(query: string, preservesNodeSubtree?: (n
   } while (deferredSearchQuery.value === query && store.sidebarSearchQuery === query);
 }
 
-function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearchTask[], refreshedNodeIds?: Set<string>, preservesNodeSubtree?: (node: TreeNode) => boolean, ancestorPreservesSearchSubtree = false, scheduledNodeIds?: Set<string>) {
+function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearchTask[], refreshedNodeIds?: Set<string>, preservesNodeSubtree?: (node: TreeNode) => boolean, ancestorPreservesSearchSubtree = false, scheduledNodeIds?: Set<string>, databaseScope?: ReadonlySet<string> | null) {
   const preservesSearchSubtree = ancestorPreservesSearchSubtree || (!!refreshedNodeIds && !!preservesNodeSubtree?.(node));
   if (refreshedNodeIds && node.type === "connection" && node.connectionId) {
+    // 数据库级节点只有被用户真正打开（树已加载或被打开的页签引用，与侧栏
+    // 「打开」高亮同口径）才参与自动搜索；一个都没打开时退回全库搜索。
+    databaseScope = resolveSidebarSearchDatabaseScope(node, {
+      enabled: settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly,
+      isChildrenLoaded: store.isTreeNodeChildrenLoaded,
+      openDatabaseKeys: queryStore.openDatabaseKeys,
+    });
     const connectionIsConnected = store.connectedIds.has(node.connectionId);
     if (connectionIsConnected && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
       const connectionId = node.connectionId;
@@ -397,6 +408,7 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
     // 断开或连不上的连接直接跳过，后台搜索不会因此弹出凭据输入或写入整段连接错误。
     if (!connectionIsConnected || node.connectionId !== store.activeConnectionId) return;
   }
+  if (refreshedNodeIds && databaseScope && isSidebarSearchPrunedDatabaseNode(node, databaseScope)) return;
   if (refreshedNodeIds && isSimpleObjectSearchParent(node)) {
     if (!scheduledNodeIds || !scheduledNodeIds.has(node.id)) {
       scheduledNodeIds?.add(node.id);
@@ -457,7 +469,7 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
   }
   if (node.children) {
     for (const child of node.children) {
-      collectExpandedObjectSearchTargets(child, tasks, refreshedNodeIds, preservesNodeSubtree, preservesSearchSubtree, scheduledNodeIds);
+      collectExpandedObjectSearchTargets(child, tasks, refreshedNodeIds, preservesNodeSubtree, preservesSearchSubtree, scheduledNodeIds, databaseScope);
     }
   }
 }
@@ -844,16 +856,6 @@ function readExpandedSidebarSchemas(): Array<{ id: string; label: string }> {
   return expanded;
 }
 
-// The plain (non-virtualized) renderer uses the same container selection as the
-// virtual sticky overlay: database containers take precedence, while schema
-// containers stick only in trees without a database-level container.
-function isPlainStickyContainerNode(index: number): boolean {
-  // Mirror the virtual branch's sticky overlay: both suppress sticky headers
-  // while a search filter is active so filtered rows don't pin at the top.
-  if (isTreeSearchFiltering.value) return false;
-  return flatTreeIndex.value.stickyContainerIndexByIndex[index] === index;
-}
-
 const sidebarLayoutMonitor = createSidebarLayoutMonitor({
   readContext: () => ({
     flatNodeCount: flatNodes.value.length,
@@ -1058,10 +1060,9 @@ watch(
 );
 
 // --- Sticky database header ---
-// RecycleScroller positions each row absolutely, so CSS `position: sticky` on
-// a database row can't work. Instead we overlay a pinned row from this parent
-// component, tracking scroll offset to find the topmost visible database-level
-// ancestor. The overlay reuses <TreeItem>, so collapse/expand comes for free.
+// Both renderers use the same overlay instead of CSS `position: sticky` on
+// individual rows. A shared overlay can be pushed out by the next connection
+// boundary, while native sticky rows would cover that non-sticky connection.
 const stickyScrollTop = ref(0);
 const sidebarScrollMetrics = ref({ scrollTop: 0, scrollLeft: 0, clientHeight: 0, clientWidth: 0, scrollHeight: 0, scrollWidth: 0 });
 const isScrollingSidebar = ref(false);
@@ -1080,7 +1081,7 @@ function updateSidebarScrollMetrics() {
     return;
   }
 
-  if (useVirtualTree.value) stickyScrollTop.value = scroller.scrollTop;
+  stickyScrollTop.value = scroller.scrollTop;
   sidebarScrollMetrics.value = {
     scrollTop: scroller.scrollTop,
     scrollLeft: scroller.scrollLeft,
@@ -1141,28 +1142,30 @@ watch(
   { flush: "post" },
 );
 
-const stickyNode = computed<FlatTreeNode | null>(() => {
-  if (!useVirtualTree.value || isTreeSearchFiltering.value) return null;
+const stickyContainerIndex = computed(() => {
+  if (isTreeSearchFiltering.value) return -1;
   const nodes = flatNodes.value;
   const len = nodes.length;
-  if (len === 0) return null;
+  if (len === 0) return -1;
 
   const topIndex = Math.min(Math.floor(stickyScrollTop.value / SIDEBAR_TREE_ROW_HEIGHT), len - 1);
   const containerIndex = flatTreeIndex.value.stickyContainerIndexByIndex[topIndex] ?? -1;
-  if (containerIndex < 0) return null;
-  return stickyScrollTop.value > containerIndex * SIDEBAR_TREE_ROW_HEIGHT ? nodes[containerIndex] : null;
+  if (containerIndex < 0) return -1;
+  return stickyScrollTop.value > containerIndex * SIDEBAR_TREE_ROW_HEIGHT ? containerIndex : -1;
 });
 
+const stickyNode = computed<FlatTreeNode | null>(() => flatNodes.value[stickyContainerIndex.value] ?? null);
+
 const stickyHeaderStyle = computed<CSSProperties>(() => {
-  const node = stickyNode.value;
-  if (!node) return {};
-  const currentIndex = flatTreeIndex.value.flatNodeIndexById.get(node.id) ?? -1;
+  const currentIndex = stickyContainerIndex.value;
   if (currentIndex < 0) return {};
-  // The next peer index is precomputed with the flat-tree snapshot so scrolling
-  // never scans the remaining tree. Connection boundaries reset the lookup.
-  const nextDatabaseIndex = SCHEMA_LEVEL_TYPES.has(node.type) ? flatTreeIndex.value.nextSchemaContainerIndexByIndex[currentIndex] : flatTreeIndex.value.nextDatabaseContainerIndexByIndex[currentIndex];
-  if (nextDatabaseIndex < 0) return {};
-  const distanceToNext = nextDatabaseIndex * SIDEBAR_TREE_ROW_HEIGHT - stickyScrollTop.value;
+  const node = flatNodes.value[currentIndex];
+  if (!node) return {};
+  const nextContainerIndex = SCHEMA_LEVEL_TYPES.has(node.type) ? flatTreeIndex.value.nextSchemaContainerIndexByIndex[currentIndex] : flatTreeIndex.value.nextDatabaseContainerIndexByIndex[currentIndex];
+  const nextBoundaryIndex = flatTreeIndex.value.nextBoundaryIndexByIndex[currentIndex] ?? -1;
+  const nextCollisionIndex = nextContainerIndex < 0 ? nextBoundaryIndex : nextBoundaryIndex < 0 ? nextContainerIndex : Math.min(nextContainerIndex, nextBoundaryIndex);
+  if (nextCollisionIndex < 0) return {};
+  const distanceToNext = nextCollisionIndex * SIDEBAR_TREE_ROW_HEIGHT - stickyScrollTop.value;
   if (distanceToNext >= SIDEBAR_TREE_ROW_HEIGHT) return {};
   return {
     transform: `translateY(${Math.min(0, distanceToNext - SIDEBAR_TREE_ROW_HEIGHT)}px)`,
@@ -1495,7 +1498,7 @@ async function flashSidebarNode(nodeId: string) {
 
 function topOcclusionHeightForSidebarNode(nodeId: string): number {
   const sticky = stickyNode.value;
-  if (!useVirtualTree.value || !sticky || sticky.id === nodeId) return 0;
+  if (!sticky || sticky.id === nodeId) return 0;
   return SIDEBAR_TREE_ROW_HEIGHT;
 }
 
@@ -2712,7 +2715,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
         <div ref="plainTreeScrollerRef" class="sidebar-tree connection-tree-scroller h-full overflow-y-auto" :class="sidebarTreeOverflowClass" :style="sidebarTreeScrollerStyle" @click="clearSidebarSelection" @scroll.passive="onTreeScroll">
           <div class="connection-tree-content">
             <TreeItem
-              v-for="(item, index) in flatNodes"
+              v-for="item in flatNodes"
               :key="item.renderKey"
               :node="item.node"
               :depth="item.depth"
@@ -2721,12 +2724,21 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
               :pending-rename="pendingRenameNodeId === item.node.id"
               :highlighted="highlightedNodeId === item.id"
               :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
-              :sticky-header="isPlainStickyContainerNode(index)"
               @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
               @rename-started="pendingRenameNodeId = null"
               @group-created="startRenamingCreatedGroup"
             />
           </div>
+        </div>
+        <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5]" :style="stickyHeaderStyle">
+          <TreeItem
+            :node="stickyNode.node"
+            :depth="stickyNode.depth"
+            :reorder-disabled="true"
+            :reference-drag-disabled="true"
+            :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
+            @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
+          />
         </div>
         <div
           v-if="hasSidebarVerticalOverflow"

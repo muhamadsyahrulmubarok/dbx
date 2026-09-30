@@ -74,7 +74,7 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
             assert_eq!(tables.len(), 2);
             let request = SqlFileRequest {
                 txn_session_id: None,
-                execution_id: format!("restore-{suffix}-{compressed}"), connection_id: connection_id.clone(), database: database.clone(), file_path: path.display().to_string(), continue_on_error: false,
+                execution_id: format!("restore-{suffix}-{compressed}"), connection_id: connection_id.clone(), database: database.clone(), schema: None, file_path: path.display().to_string(), continue_on_error: false,
                 selected_tables: Some(vec![SqlFileTable { database: Some(database.clone()), name: "chosen".into() }]),
                 part_cooldown_ms: 0,
                 skip_relational_constraints: false,
@@ -91,7 +91,7 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
         std::fs::write(&path, "DROP TABLE chosen; INSERT INTO chosen VALUES (1, 'bad'); CALL unexpected();").map_err(|e| e.to_string())?;
         let request = SqlFileRequest {
             txn_session_id: None,
-            execution_id: format!("invalid-{suffix}"), connection_id: connection_id.clone(), database: database.clone(), file_path: path.display().to_string(), continue_on_error: true,
+            execution_id: format!("invalid-{suffix}"), connection_id: connection_id.clone(), database: database.clone(), schema: None, file_path: path.display().to_string(), continue_on_error: true,
             selected_tables: Some(vec![SqlFileTable { database: None, name: "chosen".into() }]),
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
@@ -153,6 +153,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
         fail_on_error: true,
         prevent_overwrite: false,
         output_compression: Default::default(),
+        insert_dialect: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
         split_max_mb: None,
@@ -174,6 +175,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
             execution_id: format!("live-mysql-import-{suffix}"),
             connection_id: connection_id.clone(),
             database: String::new(),
+            schema: None,
             file_path: file_path.to_string_lossy().to_string(),
             continue_on_error: false,
             selected_tables: None,
@@ -293,6 +295,7 @@ async fn run_live_mysql_database_export_handles_many_tables_including_empty_tabl
                 fail_on_error: false,
                 prevent_overwrite: false,
                 output_compression: Default::default(),
+                insert_dialect: Default::default(),
                 snapshot_session_id: None,
                 batch_size: 1000,
                 split_max_mb: None,
@@ -388,6 +391,7 @@ async fn live_mysql_database_export_creates_missing_destination_directory() {
         fail_on_error: true,
         prevent_overwrite: false,
         output_compression: Default::default(),
+        insert_dialect: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
         split_max_mb: None,
@@ -403,6 +407,16 @@ async fn live_mysql_database_export_creates_missing_destination_directory() {
     assert!(missing_destination_dir.exists(), "destination directory should have been auto-created");
     let exported = std::fs::read_to_string(&file_path).unwrap();
     assert!(exported.contains("'alpha'"), "exported SQL should contain the seeded row");
+
+    // #10242: the script must declare its own encoding before the first statement that can
+    // carry non-ASCII text, otherwise an importing client whose default charset is not
+    // utf8mb4 (a `latin1` mysql CLI in a docker entrypoint, for example) re-encodes every
+    // non-ASCII value the exporter wrote as UTF-8 into mojibake.
+    let charset = exported.find("SET NAMES utf8mb4;").expect("MySQL exports must declare their encoding");
+    let create_database = exported.find("CREATE DATABASE").expect("the CREATE DATABASE preamble should be exported");
+    let create_table = exported.find("CREATE TABLE").expect("the table DDL should be exported");
+    assert!(charset < create_database, "SET NAMES must precede the CREATE DATABASE preamble");
+    assert!(charset < create_table, "SET NAMES must precede the table DDL");
 
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -455,6 +469,7 @@ async fn live_mysql_database_export_refuses_to_recreate_a_destination_that_disap
         fail_on_error: true,
         prevent_overwrite: false,
         output_compression: Default::default(),
+        insert_dialect: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
         split_max_mb: None,
@@ -543,6 +558,7 @@ async fn live_mysql_database_export_refuses_a_destination_that_vanished_before_i
         fail_on_error: true,
         prevent_overwrite: false,
         output_compression: Default::default(),
+        insert_dialect: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
         split_max_mb: None,

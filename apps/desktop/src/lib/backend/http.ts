@@ -2,6 +2,7 @@ import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRest
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
+import type { PluginUiStorageItemRef, SyncCatalogItem, SyncSelection, SyncSnapshotCatalog } from "@/lib/backend/tauri";
 
 export function databaseBackupCommand<T = unknown>(command: DatabaseBackupCommand): Promise<T> {
   return post("/api/database-backups", command);
@@ -241,7 +242,7 @@ import type {
   TableAdminSqlOptions,
   VacuumTableSqlOptions,
 } from "@/lib/database/dbAdminSql";
-import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
+import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions } from "@/lib/export/databaseExport";
 import { loadBrowserAppState, saveBrowserAppState } from "@/lib/backend/browserAppStateStorage";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
 import { apiUrl, apiWebSocketUrl } from "@/lib/common/webPath";
@@ -570,7 +571,12 @@ export async function closeDatabaseConnection(connectionId: string, database: st
   return post("/api/connection/close-database", { connectionId, database });
 }
 
-export async function saveConnections(configs: ConnectionConfig[]): Promise<void> {
+export async function saveConnections(configs: ConnectionConfig[], removedIds: string[] = []): Promise<void> {
+  // Saving upserts; ids this client deleted are sent explicitly so that a
+  // stale local list can never drop connections another client created.
+  if (removedIds.length) {
+    return post("/api/connection/save", { configs, removedIds });
+  }
   return post("/api/connection/save", { configs });
 }
 
@@ -1352,6 +1358,11 @@ export async function collectDocsSnapshot(connectionId: string, database: string
   return post("/api/docs/snapshot", { connectionId, database, schemas, tables, projectName });
 }
 
+// HTTP snapshot transport is request/response; its progress remains indeterminate.
+export async function collectDocsSnapshotForExport(connectionId: string, database: string, schemas: string[], tables: string[], _onProgress: (progress: import("./tauri").DocsCollectProgress) => void): Promise<SchemaSnapshot> {
+  return post("/api/docs/snapshot", { connectionId, database, schemas, tables, projectName: database, maxConcurrentTables: 2 });
+}
+
 export async function loadDocsAnnotations(connectionId: string): Promise<AnnotationFile | null> {
   return post("/api/docs/annotations/load", { connectionId });
 }
@@ -1923,7 +1934,7 @@ export async function buildExportInsertStatements(options: BuildExportInsertStat
   return post("/api/query/build-export-insert-statements", { options });
 }
 
-export async function buildExportSqlInsert(options: BuildExportInsertStatementsOptions): Promise<string> {
+export async function buildExportSqlInsert(options: BuildExportSqlInsertOptions): Promise<string> {
   return post("/api/query/build-export-sql-insert", { options });
 }
 
@@ -2212,6 +2223,22 @@ export async function loadWebMcpHttpStatus(): Promise<import("@/lib/backend/taur
   return get("/api/app-settings/mcp-http-status");
 }
 
+export async function saveWebMcpHttpSettings(settings: import("@/lib/backend/tauri").WebMcpHttpSettings): Promise<import("@/lib/backend/tauri").WebMcpHttpStatus> {
+  const res = await fetch(apiUrl("/api/app-settings/mcp-http"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "X-DBX-MCP-Settings": "1" },
+    body: JSON.stringify(settings),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+  return res.json();
+}
+
+export async function rotateWebMcpToken(): Promise<import("@/lib/backend/tauri").WebMcpHttpStatus> {
+  const res = await fetch(apiUrl("/api/app-settings/mcp-http/rotate-token"), { method: "POST", headers: { "X-DBX-MCP-Settings": "1" } });
+  if (!res.ok) throw await backendResponseError(res);
+  return res.json();
+}
+
 export async function loadMaxAgentTurns(): Promise<number> {
   return get("/api/app-settings/max-agent-turns");
 }
@@ -2244,6 +2271,19 @@ export async function loadHistoryRetentionLimit(): Promise<number> {
 
 export async function saveHistoryRetentionLimit(limit: number): Promise<void> {
   const res = await fetch(apiUrl("/api/app-settings/history-retention-limit"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ limit }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+}
+
+export async function loadMcpHistoryRetentionLimit(): Promise<number> {
+  return get("/api/app-settings/mcp-history-retention-limit");
+}
+
+export async function saveMcpHistoryRetentionLimit(limit: number): Promise<void> {
+  const res = await fetch(apiUrl("/api/app-settings/mcp-history-retention-limit"), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ limit }),
@@ -2404,6 +2444,8 @@ export interface WebDavSyncSummary {
   appVersion?: string;
 }
 
+export type { PluginUiStorageItemRef, SyncCatalogItem, SyncSelection, SyncSnapshotCatalog };
+
 export interface WebDavDownloadResult {
   summary: WebDavSyncSummary;
   editorSettings?: unknown;
@@ -2489,17 +2531,38 @@ export async function forgetWebdavSyncSecretsPassphrase(): Promise<void> {
   return post("/api/cloud-sync/webdav/forget-sync-secrets-passphrase", {});
 }
 
-export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string, includeSecrets = false): Promise<WebDavSyncSummary> {
+export async function cloudSyncLocalCatalog(editorSettings?: unknown): Promise<SyncSnapshotCatalog> {
+  return post("/api/cloud-sync/catalog/local", { editorSettings });
+}
+
+export async function localBackupExport(): Promise<never> {
+  throw new Error("Local backup is available only in DBX Desktop.");
+}
+
+export async function localBackupInspect(): Promise<never> {
+  throw new Error("Local backup is available only in DBX Desktop.");
+}
+
+export async function localBackupImport(): Promise<never> {
+  throw new Error("Local backup is available only in DBX Desktop.");
+}
+
+export async function webdavSyncInspect(config: WebDavConfig, secretsPassphrase?: string): Promise<SyncSnapshotCatalog> {
+  return post("/api/cloud-sync/webdav/inspect", { config, secretsPassphrase });
+}
+
+export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string, includeSecrets = false, selection?: SyncSelection): Promise<WebDavSyncSummary> {
   return post("/api/cloud-sync/webdav/upload", {
     config,
     editorSettings,
     secretsPassphrase,
     includeSecrets,
+    selection,
   });
 }
 
-export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string, restoreSecrets = true): Promise<WebDavDownloadResult> {
-  return post("/api/cloud-sync/webdav/download", { config, secretsPassphrase, restoreSecrets });
+export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string, restoreSecrets = true, selection?: SyncSelection): Promise<WebDavDownloadResult> {
+  return post("/api/cloud-sync/webdav/download", { config, secretsPassphrase, restoreSecrets, selection });
 }
 
 export async function snippetSyncTest(config: SnippetSyncConfig): Promise<void> {
@@ -2530,22 +2593,28 @@ export async function retrySnippetLegacyCleanup(config: SnippetSyncConfig): Prom
   return post("/api/cloud-sync/snippet/retry-legacy-cleanup", { config });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassphrase?: string, secretsPassphrase?: string): Promise<SyncSnapshotCatalog> {
+  return post("/api/cloud-sync/snippet/inspect", { config, snippetPassphrase, secretsPassphrase });
+}
+
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetSyncSummary> {
   return post("/api/cloud-sync/snippet/upload", {
     config,
     editorSettings,
     snippetPassphrase,
     includeSecrets,
     secretsPassphrase,
+    selection,
   });
 }
 
-export async function snippetSyncDownload(config: SnippetSyncConfig, snippetPassphrase?: string, restoreSecrets = false, secretsPassphrase?: string): Promise<SnippetDownloadResult> {
+export async function snippetSyncDownload(config: SnippetSyncConfig, snippetPassphrase?: string, restoreSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetDownloadResult> {
   return post("/api/cloud-sync/snippet/download", {
     config,
     snippetPassphrase,
     restoreSecrets,
     secretsPassphrase,
+    selection,
   });
 }
 
@@ -2766,7 +2835,7 @@ export async function saveGlobalSearchSettings(settings: GlobalSearchSettings): 
 // Data Transfer
 // ---------------------------------------------------------------------------
 
-export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void): Promise<void> {
+export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void): Promise<void> {
   // 1. POST to start the transfer
   const res = await fetch(apiUrl("/api/transfer/start"), {
     method: "POST",
@@ -2774,6 +2843,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
     body: JSON.stringify({ request }),
   });
   if (!res.ok) throw await backendResponseError(res);
+  onStarted?.();
 
   // 2. SSE to listen for progress
   return new Promise((resolve, reject) => {
@@ -2830,6 +2900,8 @@ export async function previewTableImportFile(fileOrPath: string | File | TableIm
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sourceRef: options.sourceRef,
+        connectionId: options.connectionId,
+        database: options.database,
         sourceFormat: options.sourceFormat,
         parseOptions: options.parseOptions,
         previewLimit: options.previewLimit,
@@ -2840,6 +2912,8 @@ export async function previewTableImportFile(fileOrPath: string | File | TableIm
   }
   const formData = new FormData();
   formData.append("file", fileOrPath);
+  if (options.connectionId) formData.append("connectionId", options.connectionId);
+  if (options.database != null) formData.append("database", options.database);
   if (options.sourceFormat) formData.append("sourceFormat", options.sourceFormat);
   if (options.parseOptions) formData.append("parseOptions", JSON.stringify(options.parseOptions));
   if (options.previewLimit != null) formData.append("previewLimit", String(options.previewLimit));
@@ -3326,9 +3400,9 @@ export async function cancelQueryResultExport(exportId: string, executionId?: st
   });
 }
 
-export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all"): Promise<void> {
+export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string): Promise<void> {
   const { formatCsv } = await import("@/lib/export/exportFormats");
-  const content = formatCsv(columns, rows as (string | number | boolean | null)[][], csvQuoteMode);
+  const content = formatCsv(columns, rows as (string | number | boolean | null)[][], csvQuoteMode, nullLiteral);
   const fileName = filePath.split(/[\\/]/).pop() || "export.csv";
   const blob = new Blob(["\uFEFF", content], {
     type: "text/csv;charset=utf-8",
@@ -3653,6 +3727,10 @@ export async function redisSetKeysExpireAt(connectionId: string, db: number, key
 
 export async function redisDeleteKeys(connectionId: string, db: number, keyRaws: string[]): Promise<number> {
   return post("/api/redis/delete-keys", { connectionId, db, keyRaws });
+}
+
+export async function redisDeleteKeysByPattern(connectionId: string, db: number, pattern: string): Promise<number> {
+  return post("/api/redis/delete-keys-by-pattern", { connectionId, db, pattern });
 }
 
 export async function redisFlushDb(connectionId: string, db: number): Promise<void> {
@@ -5167,6 +5245,14 @@ export async function clearHistory(): Promise<void> {
   return del("/api/history");
 }
 
+export async function clearHistoryBySource(source: string): Promise<void> {
+  return del(`/api/history?source=${encodeURIComponent(source)}`);
+}
+
+export async function cleanupMcpHistoryRetention(): Promise<number> {
+  return post("/api/app-settings/mcp-history-retention-cleanup", {});
+}
+
 export async function clearRedisHistory(): Promise<void> {
   const entries = await loadRedisHistory(1000, 0);
   await Promise.all(entries.map((e) => deleteHistoryEntry(e.id)));
@@ -5196,7 +5282,9 @@ export async function fetchChangelog(lang?: string): Promise<import("@/lib/app/c
 export async function checkMcpServerStatus(): Promise<import("@/lib/backend/tauri").McpServerStatus> {
   return {
     installed: false,
+    installation_source: null,
     npm_available: false,
+    npm_installed: false,
     node_path: null,
     node_version: null,
     current_version: null,
@@ -5217,8 +5305,16 @@ export async function installMcpServer(): Promise<string> {
   throw new Error("MCP Server installation is only available in the desktop app.");
 }
 
+export async function installNativeMcpServer(): Promise<string> {
+  throw new Error("Native MCP Server installation is only available in the desktop app.");
+}
+
 export async function uninstallMcpServer(): Promise<string> {
   throw new Error("MCP Server uninstallation is only available in the desktop app.");
+}
+
+export async function uninstallNpmMcpServer(): Promise<string> {
+  throw new Error("MCP Server npm fallback removal is only available in the desktop app.");
 }
 
 export async function getSystemProxyUrl(): Promise<string | null> {
@@ -5293,9 +5389,17 @@ export * from "@/lib/backend/mqtt-http";
 // Plugin local file streaming (native dialogs / OS drops are Tauri-only)
 // ---------------------------------------------------------------------------
 
-import type { PluginLocalFileChunk, PluginLocalFileHandle, PluginLocalFileWriteResult } from "./tauri";
+import type { PluginDroppedFilesResult, PluginLocalFileChunk, PluginLocalFileHandle, PluginLocalFileWriteResult } from "./tauri";
 
-export async function openPluginLocalFile(_pluginId: string, _path: string, _write: boolean): Promise<PluginLocalFileHandle> {
+export async function openDroppedPluginLocalFiles(_pluginId: string, _paths: string[]): Promise<PluginDroppedFilesResult> {
+  throw new Error("Plugin local file access is not available in the web backend");
+}
+
+export async function pickPluginLocalFiles(_pluginId: string, _multiple: boolean): Promise<PluginLocalFileHandle[]> {
+  throw new Error("Plugin local file access is not available in the web backend");
+}
+
+export async function savePluginLocalFileAs(_pluginId: string, _defaultFileName: string): Promise<PluginLocalFileHandle | null> {
   throw new Error("Plugin local file access is not available in the web backend");
 }
 
@@ -5309,6 +5413,14 @@ export async function writePluginLocalFileChunk(_pluginId: string, _handleId: st
 
 export async function closePluginLocalFile(_pluginId: string, _handleId: string): Promise<void> {
   throw new Error("Plugin local file access is not available in the web backend");
+}
+
+export async function openPluginMedia(_pluginId: string, _method: string, _params: Record<string, unknown>): Promise<string> {
+  throw new Error("Plugin media URLs are not available in the web backend");
+}
+
+export async function closePluginMedia(_pluginId: string, _token: string): Promise<void> {
+  throw new Error("Plugin media URLs are not available in the web backend");
 }
 
 // Plugin UI storage goes through the Rust plugin-data tree on native hosts;

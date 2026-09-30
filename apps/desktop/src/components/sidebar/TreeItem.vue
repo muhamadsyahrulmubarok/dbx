@@ -202,10 +202,6 @@ const props = defineProps<{
   pendingRename?: boolean;
   highlighted?: boolean;
   commentLabelWidth?: number;
-  /** Plain (non-virtualized) renderer: make database/schema container rows
-   * stick to the top of the tree scroller while their children scroll under
-   * them (mirrors the overlay sticky header of the virtual renderer). */
-  stickyHeader?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -313,6 +309,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: TableProperties, colorClass: "text-primary" };
     case "user-admin":
       return { icon: UsersRound, colorClass: "text-primary" };
+    case "xugu-user-admin":
+      return { icon: ShieldCheck, colorClass: "text-primary" };
     case "dameng-users":
       return { icon: UsersRound, colorClass: "text-primary" };
     case "dameng-roles":
@@ -451,7 +449,7 @@ function displayLabel(node: TreeNode): string {
   // Use the canonical key for persisted trees created before this label was
   // internationalized; those nodes may still contain the old Chinese text.
   if (node.type === "nacos-access-control") return t("nacos.accessControlSidebarLabel");
-  if (node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "meilisearch-system") return t(node.label);
+  if (node.type === "user-admin" || node.type === "xugu-user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "meilisearch-system") return t(node.label);
   if (node.type === "oracle-db-links" || node.type === "linked-server-root") return t(node.label);
   if (node.type === "saved-sql-root") return t(node.label);
   if (node.type === "mqtt-topic" && node.id.endsWith(":mqtt-topic:__console__")) return t(node.label);
@@ -969,6 +967,10 @@ const tableSearchValue = computed(() => {
 });
 
 const isConnecting = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && connectionStore.connectingIds.has(activeNode.value.connectionId));
+
+// Keep disconnected connections visually subdued without stripping their
+// database colors entirely; the trailing green dot still marks active ones.
+const connectionIconInactiveClass = computed(() => (activeNode.value.type === "connection" && activeNode.value.connectionId && !connectionStore.connectedIds.has(activeNode.value.connectionId) ? "saturate-50 opacity-70" : ""));
 
 const isConnectionReadonly = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && (connectionStore.getConfig(activeNode.value.connectionId)?.read_only ?? false));
 
@@ -1610,7 +1612,7 @@ function onKeydown(event: KeyboardEvent) {
     </LightTooltip>
   </div>
 
-  <div v-else :class="{ 'sidebar-tree-item--sticky': stickyHeader }" @contextmenu="onTreeItemContextMenu">
+  <div v-else @contextmenu="onTreeItemContextMenu">
     <LightTooltip :text="visibleLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="30" :surface="detailTooltip ? 'popover' : 'foreground'">
       <div
         ref="rowRef"
@@ -1655,8 +1657,8 @@ function onKeydown(event: KeyboardEvent) {
         </template>
         <span v-else class="w-3.5 h-3.5 shrink-0" />
         <span class="relative flex h-3.5 w-3.5 shrink-0" :class="{ 'overflow-visible': node.valid === false || isDisabledTrigger }">
-          <PluginIcon v-if="node.type === 'connection' && pluginConnectionIcon" :plugin-id="pluginConnectionIcon.pluginId" :contribution-id="pluginConnectionIcon.contributionId" class="h-3.5 w-3.5 shrink-0" />
-          <DatabaseIcon v-else-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
+          <PluginIcon v-if="node.type === 'connection' && pluginConnectionIcon" :plugin-id="pluginConnectionIcon.pluginId" :contribution-id="pluginConnectionIcon.contributionId" class="h-3.5 w-3.5 shrink-0" :class="connectionIconInactiveClass" />
+          <DatabaseIcon v-else-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" :class="connectionIconInactiveClass" />
           <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
           <component v-else :is="getIconInfo(node)?.icon || Database" class="h-3.5 w-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
           <CircleX v-if="node.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-1 -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
@@ -1932,18 +1934,6 @@ function onKeydown(event: KeyboardEvent) {
 .tree-item-connection-tint.tree-item-active,
 .tree-item-connection-tint.tree-item-active:focus {
   background-color: transparent !important;
-}
-
-/* Plain (non-virtualized) renderer: database/schema container rows stick to
-   the top of the tree scroller while their children scroll under them,
-   mirroring the overlay sticky header the virtual renderer uses. The row is
-   min-h-7, so a solid background guarantees no content shows through while
-   rows slide underneath. */
-.sidebar-tree-item--sticky {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background-color: var(--sidebar);
 }
 
 .tree-item-connection-tint:hover::before {

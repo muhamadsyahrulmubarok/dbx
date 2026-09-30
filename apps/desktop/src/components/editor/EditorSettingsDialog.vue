@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { cleanupMcpHistoryRetention, loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit } from "@/lib/backend/api";
 import { HISTORY_RETENTION_LIMITS, useHistoryRetentionSetting } from "@/composables/useHistoryRetentionSetting";
 import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } from "vue";
 import type { Ref } from "vue";
@@ -23,6 +24,7 @@ import {
   Filter,
   Globe,
   GripVertical,
+  HardDrive,
   Loader2,
   Moon,
   PackageSearch,
@@ -100,6 +102,7 @@ import {
   type TabSortMode,
   type UpdateDownloadSource,
   type CsvQuoteMode,
+  type CsvNullMode,
   type CustomThemeColors,
   type CustomTheme,
   type McpConnectionPolicy,
@@ -107,6 +110,7 @@ import {
   type ClickTableNavigationTarget,
   type EditorSettings,
   type SqlCompletionTriggerMode,
+  type SqlTableCompletionSchemaQualification,
   type TableHoverLookupMode,
   SIDEBAR_INDENT_MIN,
   SIDEBAR_INDENT_MAX,
@@ -122,6 +126,7 @@ import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import DataGridTypeColorSchemeDialog from "@/components/grid/DataGridTypeColorSchemeDialog.vue";
 import { DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID, cloneDataGridTypeColorSchemes, type DataGridTypeColorScheme } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import TunnelProfileManager from "@/components/connection/TunnelProfileManager.vue";
+import CloudSyncSelectionDialog from "@/components/editor/CloudSyncSelectionDialog.vue";
 import DangerConfirmDialog from "./DangerConfirmDialog.vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTheme } from "@/composables/useTheme";
@@ -132,17 +137,25 @@ import {
   aiTestConnection,
   checkMcpServerStatus,
   installMcpServer,
+  installNativeMcpServer,
   uninstallMcpServer,
+  uninstallNpmMcpServer,
   loadMcpHttpServerSettings,
   saveMcpHttpServerSettings,
   mcpHttpServerStatus,
   rotateMcpHttpServerToken,
   loadWebMcpHttpStatus,
+  saveWebMcpHttpSettings,
+  rotateWebMcpToken,
   forgetSnippetSavedToken,
   forgetWebdavSyncSecretsPassphrase,
   forgetWebdavSavedPassword,
   getAppSupportInfo,
   checkBackgroundImage,
+  cloudSyncLocalCatalog,
+  localBackupExport,
+  localBackupImport,
+  localBackupInspect,
   clearBackgroundImage,
   saveBackgroundImage,
   loadMaxAgentTurns,
@@ -157,12 +170,14 @@ import {
   saveSnippetSyncId,
   retrySnippetLegacyCleanup,
   snippetSyncDownload,
+  snippetSyncInspect,
   snippetSyncSettings,
   snippetSyncTest,
   snippetSyncUpload,
   snippetTokenStatus,
   webdavPasswordStatus,
   webdavSyncDownload,
+  webdavSyncInspect,
   webdavSyncSecretsStatus,
   webdavSyncTest,
   webdavSyncUpload,
@@ -171,9 +186,12 @@ import {
   type McpHttpServerSettings,
   type McpHttpServerStatus,
   type WebMcpHttpStatus,
+  type WebMcpHttpSettings,
   type McpServerStatus,
   type SnippetProvider,
   type SnippetSyncConfig,
+  type SyncSelection,
+  type SyncSnapshotCatalog,
   type WebDavConfig,
 } from "@/lib/backend/api";
 import { eventToModifierOnlyShortcut, eventToShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -192,7 +210,16 @@ import { validateConfigName, generateId, type AiConfigItem, type ConfigNameValid
 import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES, tableColumnTemplateRowsToSettings } from "@/lib/table/tableColumnTemplates";
-import { DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES, normalizeSqlVariableSyntaxOverrides, SQL_VARIABLE_SYNTAX_DATABASE_TYPES, SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS, type SqlVariableSyntaxOverrides, type SqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
+import {
+  DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES,
+  normalizeSqlVariableSyntaxOverrides,
+  resolveSqlVariableSyntaxToggles,
+  SQL_VARIABLE_SYNTAX_DATABASE_TYPES,
+  SQL_VARIABLE_SYNTAX_KEYS,
+  SQL_VARIABLE_SYNTAX_TOKENS,
+  type SqlVariableSyntaxOverrides,
+  type SqlVariableSyntaxToggles,
+} from "@/lib/sql/sqlVariableSyntax";
 import {
   buildMcpCherryStudioConfig,
   buildMcpCodexConfig,
@@ -206,10 +233,22 @@ import {
   buildMcpWorkBuddyConfig,
   mcpWebBackendUrl,
   type McpLaunchConfig,
+  preferMcpNativeLaunch,
 } from "@/lib/mcp/mcpConfigTemplates";
 import { beginMcpStatusRequest, mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
-import { isMcpPolicyMutationBlocked, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COLUMNS, MCP_TOOL_OPTIONS, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, toggleMcpAllowedToolName, type McpExecutionMode } from "@/lib/mcp/mcpPolicySelection";
+import {
+  addMcpAllowedToolName,
+  customMcpAllowedToolNames,
+  isMcpPolicyMutationBlocked,
+  MCP_CAPABILITY_ROWS,
+  MCP_EXECUTION_MODE_COLUMNS,
+  MCP_TOOL_OPTIONS,
+  mcpExecutionModeFromPolicy,
+  mcpPolicyFieldsForExecutionMode,
+  toggleMcpAllowedToolName,
+  type McpExecutionMode,
+} from "@/lib/mcp/mcpPolicySelection";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
@@ -264,6 +303,16 @@ import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { currentLocale, previewLocale, restoreLocalePreview, setLocale, type Locale } from "@/i18n";
 import {
+  AI_CONVERSATION_FONT_FAMILY_DEFAULT,
+  AI_CONVERSATION_FONT_SIZE_DEFAULT,
+  AI_CONVERSATION_FONT_SIZE_MAX,
+  AI_CONVERSATION_FONT_SIZE_MIN,
+  aiConversationFontFamilyForName,
+  normalizeAiConversationFontFamily,
+  normalizeAiConversationFontFamilyInput,
+  normalizeAiConversationFontSize,
+} from "@/lib/ai/aiTypography";
+import {
   SETTINGS_SEARCH_DEFINITIONS,
   TOOLBAR_VISIBILITY_ITEMS,
   createShortcutSettingsSearchDefinitions,
@@ -277,7 +326,7 @@ import {
   type ToolbarVisibilityItem,
 } from "@/lib/settings/settingsSearch";
 import { LOCALE_OPTIONS } from "@/lib/app/localeOptions";
-import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PATH, normalizedWebDavAutoUploadInterval, writeWebDavAutoUploadFields } from "@/lib/webdav/webdavAutoUploadConfig";
+import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PATH, normalizedWebDavAutoUploadInterval, writeWebDavAutoUploadFields, writeWebDavBackupSelection } from "@/lib/webdav/webdavAutoUploadConfig";
 import { apiUrl, webPath } from "@/lib/common/webPath";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, normalizeCustomFontFamilyInput, readableFontFamily, SYSTEM_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { buildFontFamilyOptions, displayFontFamily, isPresetFontFamily, loadSystemFontNames } from "@/lib/app/fontFamilyOptions";
@@ -299,7 +348,10 @@ const { t, locale } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const historyRetention = useHistoryRetentionSetting();
+const mcpHistoryRetention = useHistoryRetentionSetting(loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit);
 const { draft: editHistoryRetentionLimit, loaded: historyRetentionLoaded, loading: historyRetentionLoading, saving: historyRetentionSaving, loadError: historyRetentionLoadError } = historyRetention;
+const { draft: editMcpHistoryRetentionLimit, loaded: mcpHistoryRetentionLoaded, loading: mcpHistoryRetentionLoading, saving: mcpHistoryRetentionSaving, loadError: mcpHistoryRetentionLoadError } = mcpHistoryRetention;
+const mcpHistoryCleanupLoading = ref(false);
 const connectionStore = useConnectionStore();
 const hasSqlServerConnection = computed(() => connectionStore.connections.some((connection) => effectiveDatabaseTypeForConnection(connection) === "sqlserver"));
 const savedSqlStore = useSavedSqlStore();
@@ -581,6 +633,9 @@ function createEmptyTableColumnTemplateRow(): TableColumnTemplateGridRow {
 // Local edit state
 const editFontFamily = ref(settingsStore.editorSettings.fontFamily);
 const editFontSize = ref(settingsStore.editorSettings.fontSize);
+const editAiFontFamily = ref(settingsStore.editorSettings.aiFontFamily);
+const editAiFontSize = ref<number | string>(settingsStore.editorSettings.aiFontSize);
+const aiTypographySaving = ref(false);
 const editTableFontFamily = ref(settingsStore.editorSettings.tableFontFamily);
 const editUiFontFamily = ref(settingsStore.editorSettings.uiFontFamily);
 const editUiScale = ref(settingsStore.editorSettings.uiScale);
@@ -613,6 +668,15 @@ const editShowLineNumbers = ref(settingsStore.editorSettings.showLineNumbers);
 const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurrentStatementFrame);
 const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValueHints);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
+const editTableCompletionSchemaQualification = ref<SqlTableCompletionSchemaQualification>(settingsStore.editorSettings.tableCompletionSchemaQualification);
+const tableCompletionSchemaQualificationDescription = computed(() => {
+  const key = {
+    never: "settings.tableCompletionSchemaQualificationNeverDescription",
+    collision: "settings.tableCompletionSchemaQualificationCollisionDescription",
+    always: "settings.tableCompletionSchemaQualificationAlwaysDescription",
+  }[editTableCompletionSchemaQualification.value];
+  return t(key);
+});
 const editInsertSpaceAfterCompletion = ref(settingsStore.editorSettings.insertSpaceAfterCompletion);
 const editSqlServerSpaceConfirmsCompletion = ref(settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion);
 const showSqlServerSpaceConfirmsCompletion = computed(() => hasSqlServerConnection.value || settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion || editSqlServerSpaceConfirmsCompletion.value);
@@ -631,7 +695,9 @@ const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editShowWhitespace = ref(settingsStore.editorSettings.showWhitespace);
 const editDdlOpenMode = ref<EditorSettings["ddlOpenMode"]>(settingsStore.editorSettings.ddlOpenMode);
 const editVimModeEnabled = ref(settingsStore.editorSettings.vimModeEnabled);
+const editDoubleClickStringSelectionMode = ref<EditorSettings["doubleClickStringSelectionMode"]>(settingsStore.editorSettings.doubleClickStringSelectionMode);
 const editAutoCloseBrackets = ref(settingsStore.editorSettings.autoCloseBrackets);
+const editRestoreSqlFromSourcePasteEnabled = ref(settingsStore.editorSettings.restoreSqlFromSourcePasteEnabled);
 const editSqlSemanticDiagnosticsMode = ref<SqlSemanticDiagnosticsMode>(settingsStore.editorSettings.sqlSemanticDiagnosticsMode);
 const editSqlSemanticDiagnosticsEnabled = ref(settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
 const editConfirmDangerousSqlExecution = ref(settingsStore.editorSettings.confirmDangerousSqlExecution);
@@ -642,6 +708,7 @@ const editSavedSqlOpenTargetMode = ref<SavedSqlOpenTargetMode>(settingsStore.edi
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editTabLayout = ref(settingsStore.editorSettings.tabLayout);
 const editTabPlacement = ref<TabPlacement>(settingsStore.editorSettings.tabPlacement);
+const editColorizeConnectionTabs = ref(settingsStore.editorSettings.colorizeConnectionTabs);
 const editTabGroupMode = ref<TabGroupMode>(settingsStore.editorSettings.tabGroupMode);
 const editTabSortMode = ref<TabSortMode>(settingsStore.editorSettings.tabSortMode);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
@@ -730,11 +797,12 @@ function updateExternalSqlEditorMaxMbInput(event: Event) {
 }
 
 function sqlVariableSyntaxToggle(key: keyof SqlVariableSyntaxToggles): boolean {
-  return editSqlVariableSyntaxOverrides.value[editSqlVariableSyntaxDatabaseType.value]?.[key] ?? true;
+  return resolveSqlVariableSyntaxToggles(editSqlVariableSyntaxOverrides.value, editSqlVariableSyntaxDatabaseType.value)[key];
 }
 
 function setSqlVariableSyntaxToggle(key: keyof SqlVariableSyntaxToggles, value: boolean) {
   const dbType = editSqlVariableSyntaxDatabaseType.value;
+  if ((dbType === "neo4j" || dbType === "nebula") && key === "named") return;
   const merged: SqlVariableSyntaxToggles = {
     ...DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES,
     ...editSqlVariableSyntaxOverrides.value[dbType],
@@ -767,6 +835,7 @@ const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
 const dataTabReuseModeHelp = ref<DataTabReuseMode | null>(null);
 const editRoutineSourceOpenMode = ref(settingsStore.editorSettings.routineSourceOpenMode);
 const editSidebarTableSearchEnabled = ref(settingsStore.editorSettings.sidebarTableSearchEnabled);
+const editSidebarSearchOpenedDatabasesOnly = ref(settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
 const editSidebarBrowseObjectsOnDatabaseActivation = ref(settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
@@ -814,6 +883,7 @@ const editSidebarIndent = ref(settingsStore.editorSettings.sidebarIndent);
 const editSidebarFontSize = ref(settingsStore.editorSettings.sidebarFontSize);
 const editExportBatchSize = ref(settingsStore.editorSettings.exportBatchSize);
 const editCsvQuoteMode = ref<CsvQuoteMode>(settingsStore.editorSettings.csvQuoteMode);
+const editCsvNullMode = ref<CsvNullMode>(settingsStore.editorSettings.csvNullMode);
 const editGlobalDateTimeDisplayFormat = ref(settingsStore.editorSettings.globalDateTimeDisplayFormat);
 const editGlobalDateTimeExportFormat = ref(settingsStore.editorSettings.globalDateTimeExportFormat);
 const editGlobalDateTimeImportFormat = ref(settingsStore.editorSettings.globalDateTimeImportFormat);
@@ -981,6 +1051,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showCurrentStatementFrame: editShowCurrentStatementFrame.value,
     showInsertValueHints: editShowInsertValueHints.value,
     autoAliasTables: editAutoAliasTables.value,
+    tableCompletionSchemaQualification: editTableCompletionSchemaQualification.value,
     insertSpaceAfterCompletion: editInsertSpaceAfterCompletion.value,
     sqlServerSpaceConfirmsCompletion: editSqlServerSpaceConfirmsCompletion.value,
     sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically.value,
@@ -990,7 +1061,9 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showWhitespace: editShowWhitespace.value,
     ddlOpenMode: editDdlOpenMode.value,
     vimModeEnabled: editVimModeEnabled.value,
+    doubleClickStringSelectionMode: editDoubleClickStringSelectionMode.value,
     autoCloseBrackets: editAutoCloseBrackets.value,
+    restoreSqlFromSourcePasteEnabled: editRestoreSqlFromSourcePasteEnabled.value,
     sqlSemanticDiagnosticsMode: editSqlSemanticDiagnosticsMode.value,
     confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
     continueOnErrorOnBatch: editContinueOnErrorOnBatch.value,
@@ -1000,6 +1073,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     appLayout: editAppLayout.value,
     tabLayout: editTabLayout.value,
     tabPlacement: editTabPlacement.value,
+    colorizeConnectionTabs: editColorizeConnectionTabs.value,
     tabGroupMode: editTabGroupMode.value,
     tabSortMode: editTabSortMode.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
@@ -1042,6 +1116,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
     routineSourceOpenMode: editRoutineSourceOpenMode.value,
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
+    sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
     sidebarBrowseObjectsOnDatabaseActivation: editSidebarBrowseObjectsOnDatabaseActivation.value,
     openTabsRestoreMode: editOpenTabsRestoreMode.value,
@@ -1075,6 +1150,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     redisDatabaseDisplayLimit: editRedisDatabaseDisplayLimit.value,
     exportBatchSize: editExportBatchSize.value,
     csvQuoteMode: editCsvQuoteMode.value,
+    csvNullMode: editCsvNullMode.value,
     globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat.value,
     globalDateTimeExportFormat: editGlobalDateTimeExportFormat.value,
     globalDateTimeImportFormat: editGlobalDateTimeImportFormat.value,
@@ -1568,6 +1644,12 @@ const systemFontOptions = computed(() => {
 
 const tableFontOptions = computed(() => buildFontFamilyOptions(systemFonts.value, [editTableFontFamily.value], [DEFAULT_DATA_GRID_FONT_FAMILY]));
 
+const aiFontOptions = computed(() => {
+  const options = new Set([DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY, ...systemFonts.value.map(aiConversationFontFamilyForName)]);
+  if (editAiFontFamily.value) options.add(editAiFontFamily.value);
+  return [...options];
+});
+
 const uiFontOptions = computed(() => {
   const options = new Set([SYSTEM_UI_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, ...systemFontOptions.value]);
   if (editUiFontFamily.value) options.add(editUiFontFamily.value);
@@ -1578,6 +1660,11 @@ function displayUiFontFamily(value: string): string {
   if (value === SYSTEM_UI_FONT_FAMILY) return t("settings.uiFontSystemDefault");
   if (value === DEFAULT_UI_FONT_FAMILY) return t("settings.uiFontAppDefault");
   return displayFontFamily(value);
+}
+
+function displayAiFontFamily(value: string): string {
+  if (!value) return t("ai.conversationFontFollowInterface");
+  return displayUiFontFamily(value);
 }
 
 function fontOptionStyle(value: string, selectedValue = editFontFamily.value) {
@@ -1609,6 +1696,8 @@ const hasImportedSettingsPendingApply = ref(false);
 function syncEditorSettingsDraftFromStore() {
   editFontFamily.value = settingsStore.editorSettings.fontFamily;
   editFontSize.value = settingsStore.editorSettings.fontSize;
+  editAiFontFamily.value = settingsStore.editorSettings.aiFontFamily;
+  editAiFontSize.value = settingsStore.editorSettings.aiFontSize;
   editTableFontFamily.value = settingsStore.editorSettings.tableFontFamily;
   editUiFontFamily.value = settingsStore.editorSettings.uiFontFamily;
   editUiScale.value = settingsStore.editorSettings.uiScale;
@@ -1627,6 +1716,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowCurrentStatementFrame.value = settingsStore.editorSettings.showCurrentStatementFrame;
   editShowInsertValueHints.value = settingsStore.editorSettings.showInsertValueHints;
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
+  editTableCompletionSchemaQualification.value = settingsStore.editorSettings.tableCompletionSchemaQualification;
   editInsertSpaceAfterCompletion.value = settingsStore.editorSettings.insertSpaceAfterCompletion;
   editSqlServerSpaceConfirmsCompletion.value = settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion;
   editSortCompletionColumnsAlphabetically.value = settingsStore.editorSettings.sortCompletionColumnsAlphabetically;
@@ -1636,7 +1726,9 @@ function syncEditorSettingsDraftFromStore() {
   editShowWhitespace.value = settingsStore.editorSettings.showWhitespace;
   editDdlOpenMode.value = settingsStore.editorSettings.ddlOpenMode;
   editVimModeEnabled.value = settingsStore.editorSettings.vimModeEnabled;
+  editDoubleClickStringSelectionMode.value = settingsStore.editorSettings.doubleClickStringSelectionMode;
   editAutoCloseBrackets.value = settingsStore.editorSettings.autoCloseBrackets;
+  editRestoreSqlFromSourcePasteEnabled.value = settingsStore.editorSettings.restoreSqlFromSourcePasteEnabled;
   editSqlSemanticDiagnosticsMode.value = settingsStore.editorSettings.sqlSemanticDiagnosticsMode;
   editSqlSemanticDiagnosticsEnabled.value = settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
   editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
@@ -1647,6 +1739,7 @@ function syncEditorSettingsDraftFromStore() {
   editAppLayout.value = settingsStore.editorSettings.appLayout;
   editTabLayout.value = settingsStore.editorSettings.tabLayout;
   editTabPlacement.value = settingsStore.editorSettings.tabPlacement;
+  editColorizeConnectionTabs.value = settingsStore.editorSettings.colorizeConnectionTabs;
   editTabGroupMode.value = settingsStore.editorSettings.tabGroupMode;
   editTabSortMode.value = settingsStore.editorSettings.tabSortMode;
   editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
@@ -1690,6 +1783,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
   editRoutineSourceOpenMode.value = settingsStore.editorSettings.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
+  editSidebarSearchOpenedDatabasesOnly.value = settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly;
   editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
   editSidebarBrowseObjectsOnDatabaseActivation.value = settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation;
   editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
@@ -1722,6 +1816,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarFontSize.value = settingsStore.editorSettings.sidebarFontSize;
   editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
   editCsvQuoteMode.value = settingsStore.editorSettings.csvQuoteMode;
+  editCsvNullMode.value = settingsStore.editorSettings.csvNullMode;
   editGlobalDateTimeDisplayFormat.value = settingsStore.editorSettings.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = settingsStore.editorSettings.globalDateTimeExportFormat;
   editGlobalDateTimeImportFormat.value = settingsStore.editorSettings.globalDateTimeImportFormat;
@@ -1765,6 +1860,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   showCurrentStatementFrame: editShowCurrentStatementFrame,
   showInsertValueHints: editShowInsertValueHints,
   autoAliasTables: editAutoAliasTables,
+  tableCompletionSchemaQualification: editTableCompletionSchemaQualification,
   insertSpaceAfterCompletion: editInsertSpaceAfterCompletion,
   sqlServerSpaceConfirmsCompletion: editSqlServerSpaceConfirmsCompletion,
   sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically,
@@ -1773,7 +1869,9 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   showWhitespace: editShowWhitespace,
   ddlOpenMode: editDdlOpenMode,
   vimModeEnabled: editVimModeEnabled,
+  doubleClickStringSelectionMode: editDoubleClickStringSelectionMode,
   autoCloseBrackets: editAutoCloseBrackets,
+  restoreSqlFromSourcePasteEnabled: editRestoreSqlFromSourcePasteEnabled,
   sqlSemanticDiagnosticsMode: editSqlSemanticDiagnosticsMode,
   confirmDangerousSqlExecution: editConfirmDangerousSqlExecution,
   confirmUnsavedSqlClose: editConfirmUnsavedSqlClose,
@@ -1782,6 +1880,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   appLayout: editAppLayout,
   tabLayout: editTabLayout,
   tabPlacement: editTabPlacement,
+  colorizeConnectionTabs: editColorizeConnectionTabs,
   tabGroupMode: editTabGroupMode,
   tabSortMode: editTabSortMode,
   showColumnCommentsInHeader: editShowColumnCommentsInHeader,
@@ -1823,6 +1922,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarObjectDisplay: editSidebarObjectDisplay,
   routineSourceOpenMode: editRoutineSourceOpenMode,
   sidebarTableSearchEnabled: editSidebarTableSearchEnabled,
+  sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly,
   autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode,
   sidebarBrowseObjectsOnDatabaseActivation: editSidebarBrowseObjectsOnDatabaseActivation,
   openTabsRestoreMode: editOpenTabsRestoreMode,
@@ -1856,6 +1956,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   redisDatabaseDisplayLimit: editRedisDatabaseDisplayLimit,
   exportBatchSize: editExportBatchSize,
   csvQuoteMode: editCsvQuoteMode,
+  csvNullMode: editCsvNullMode,
   exportRowLimitEnabled: editExportRowLimitEnabled,
   exportRowLimit: editExportRowLimit,
   queryExportKeysetOptimizationEnabled: editQueryExportKeysetOptimizationEnabled,
@@ -1902,6 +2003,7 @@ watch(
     if (open) {
       syncEditorSettingsDraftFromStore();
       void historyRetention.load();
+      void mcpHistoryRetention.load();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
@@ -1911,6 +2013,7 @@ watch(
       editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     } else {
       historyRetention.discard();
+      mcpHistoryRetention.discard();
       clearThemePaletteOptionPreview();
       clearUiFontOptionPreview();
       restoreLocaleOptionPreview();
@@ -2110,11 +2213,25 @@ const queryResultRowLimitDraftTouched = computed(
     normalizeTableOpenPageSizeDraft(editPageSize.value) !== normalizeTableOpenPageSizeDraft(editEditorSettingsBase.value.pageSize),
 );
 const hasBlockingQueryResultRowLimit = computed(() => queryResultRowLimitViolated.value && queryResultRowLimitDraftTouched.value);
-const hasApplyBlocker = computed(() => historyRetention.invalid.value || historyRetentionSaving.value || hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value);
+const hasApplyBlocker = computed(() => historyRetention.invalid.value || mcpHistoryRetention.invalid.value || historyRetentionSaving.value || mcpHistoryRetentionSaving.value || hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value);
+
+async function cleanupMcpHistory() {
+  if (mcpHistoryCleanupLoading.value) return;
+  mcpHistoryCleanupLoading.value = true;
+  try {
+    const deleted = await cleanupMcpHistoryRetention();
+    toast(t("settings.mcpHistoryCleanupCompleted", { count: deleted }));
+  } catch (error) {
+    toast(t("settings.mcpHistoryCleanupFailed", { error: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    mcpHistoryCleanupLoading.value = false;
+  }
+}
 
 function hasChanges(): boolean {
   return (
     historyRetention.changed.value ||
+    mcpHistoryRetention.changed.value ||
     hasImportedSettingsPendingApply.value ||
     hasEditorDraftChanges.value ||
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
@@ -2131,6 +2248,7 @@ function hasChanges(): boolean {
 async function persistSettings() {
   if (hasApplyBlocker.value) return;
   await historyRetention.save();
+  await mcpHistoryRetention.save();
   const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
   const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
@@ -2236,6 +2354,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
     editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+    editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
     editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
     editSqlServerSpaceConfirmsCompletion.value = DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion;
     editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
@@ -2245,7 +2364,9 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.showWhitespace;
     editDdlOpenMode.value = DEFAULT_EDITOR_SETTINGS.ddlOpenMode;
     editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
+    editDoubleClickStringSelectionMode.value = DEFAULT_EDITOR_SETTINGS.doubleClickStringSelectionMode;
     editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
+    editRestoreSqlFromSourcePasteEnabled.value = DEFAULT_EDITOR_SETTINGS.restoreSqlFromSourcePasteEnabled;
     editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
     editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
     editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
@@ -2272,6 +2393,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
     editTabLayout.value = DEFAULT_EDITOR_SETTINGS.tabLayout;
     editTabPlacement.value = DEFAULT_EDITOR_SETTINGS.tabPlacement;
+    editColorizeConnectionTabs.value = DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabs;
     editTabGroupMode.value = DEFAULT_EDITOR_SETTINGS.tabGroupMode;
     editTabSortMode.value = DEFAULT_EDITOR_SETTINGS.tabSortMode;
     editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
@@ -2286,6 +2408,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
     editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
+    editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
     editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
@@ -2310,6 +2433,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
   } else if (tab === "data") {
     historyRetention.reset();
+    mcpHistoryRetention.reset();
     editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
     editShowColumnHeaderTooltips.value = DEFAULT_EDITOR_SETTINGS.showColumnHeaderTooltips;
@@ -2349,6 +2473,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editRedisDatabaseDisplayLimit.value = DEFAULT_EDITOR_SETTINGS.redisDatabaseDisplayLimit;
     editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
     editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
+    editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
     editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
     editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
     editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
@@ -2371,6 +2496,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
 
 function resetAllDefaults() {
   historyRetention.reset();
+  mcpHistoryRetention.reset();
   // Same contract as resetDefaultsForTab: a full reset also exits any
   // in-progress shortcut capture (#9066).
   editingShortcutId.value = null;
@@ -2392,6 +2518,7 @@ function resetAllDefaults() {
   editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
   editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+  editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
   editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
   editSqlServerSpaceConfirmsCompletion.value = DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion;
   editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
@@ -2400,7 +2527,9 @@ function resetAllDefaults() {
   editShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.showWhitespace;
   editDdlOpenMode.value = DEFAULT_EDITOR_SETTINGS.ddlOpenMode;
   editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
+  editDoubleClickStringSelectionMode.value = DEFAULT_EDITOR_SETTINGS.doubleClickStringSelectionMode;
   editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
+  editRestoreSqlFromSourcePasteEnabled.value = DEFAULT_EDITOR_SETTINGS.restoreSqlFromSourcePasteEnabled;
   editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
   editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
   editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
@@ -2459,6 +2588,7 @@ function resetAllDefaults() {
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
   editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
+  editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
   editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
@@ -2490,6 +2620,7 @@ function resetAllDefaults() {
   editRedisDatabaseDisplayLimit.value = DEFAULT_EDITOR_SETTINGS.redisDatabaseDisplayLimit;
   editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
   editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
+  editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
   editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
   editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
@@ -2640,6 +2771,12 @@ function onCompletionTriggerModeChange(v: any) {
   }
 }
 
+function onTableCompletionSchemaQualificationChange(v: any) {
+  if (v === "never" || v === "collision" || v === "always") {
+    editTableCompletionSchemaQualification.value = v;
+  }
+}
+
 function onTableHoverLookupModeChange(v: any) {
   if (v === "current" || v === "fallback" || v === "always") {
     editTableHoverLookupMode.value = v;
@@ -2664,6 +2801,44 @@ function onUiFontFamilyChange(v: any) {
     editUiFontFamily.value = v;
     uiFontOptionPreview.runNow(v);
   }
+}
+
+async function persistAiTypography(partial: Partial<Pick<EditorSettings, "aiFontFamily" | "aiFontSize">>) {
+  aiTypographySaving.value = true;
+  try {
+    await settingsStore.updateEditorSettingsAndPersist(partial);
+  } catch (error) {
+    applySettingsErrorToast(error);
+  } finally {
+    editAiFontFamily.value = settingsStore.editorSettings.aiFontFamily;
+    editAiFontSize.value = settingsStore.editorSettings.aiFontSize;
+    aiTypographySaving.value = false;
+  }
+}
+
+function onAiFontFamilyChange(value: unknown) {
+  const fontFamily = normalizeAiConversationFontFamily(value);
+  editAiFontFamily.value = fontFamily;
+  if (fontFamily !== settingsStore.editorSettings.aiFontFamily) void persistAiTypography({ aiFontFamily: fontFamily });
+}
+
+function commitAiFontSize() {
+  const fontSize = normalizeAiConversationFontSize(editAiFontSize.value);
+  editAiFontSize.value = fontSize;
+  if (fontSize !== settingsStore.editorSettings.aiFontSize) void persistAiTypography({ aiFontSize: fontSize });
+}
+
+function blurAiFontSizeInput(event: KeyboardEvent) {
+  (event.target as HTMLInputElement | null)?.blur();
+}
+
+function resetAiTypography() {
+  editAiFontFamily.value = AI_CONVERSATION_FONT_FAMILY_DEFAULT;
+  editAiFontSize.value = AI_CONVERSATION_FONT_SIZE_DEFAULT;
+  void persistAiTypography({
+    aiFontFamily: AI_CONVERSATION_FONT_FAMILY_DEFAULT,
+    aiFontSize: AI_CONVERSATION_FONT_SIZE_DEFAULT,
+  });
 }
 
 const themeSelectValue = computed(() => {
@@ -2753,6 +2928,10 @@ function setRoutineSourceOpenMode(value: "query-tab" | "dialog") {
 
 function setDdlOpenMode(value: unknown) {
   if (value === "dialog" || value === "tab") editDdlOpenMode.value = value;
+}
+
+function setDoubleClickStringSelectionMode(value: unknown) {
+  if (value === "content" || value === "word") editDoubleClickStringSelectionMode.value = value;
 }
 
 function setIconTheme(value: DesktopIconTheme) {
@@ -3094,6 +3273,7 @@ async function revealSettingsSearchTarget(result: SettingsSearchEntry) {
 async function selectSettingsSearchResult(result: SettingsSearchEntry) {
   pendingSettingsSearchResult = result;
   if (result.shortcutId) shortcutSearchQuery.value = result.title;
+  if (result.category === "ai") aiConfigListMode.value = "list";
   applySettingsSearchRoute(result);
   settingsSearchQuery.value = "";
   settingsSearchOpen.value = false;
@@ -3300,6 +3480,11 @@ const mcpHttpSettings = ref<McpHttpServerSettings>({
 });
 const mcpHttpStatus = ref<McpHttpServerStatus | null>(null);
 const webMcpHttpStatus = ref<WebMcpHttpStatus | null>(null);
+const webMcpEnabledDraft = ref(false);
+const webMcpAllowedHostsText = ref("");
+const webMcpAllowedOriginsText = ref("");
+const webMcpSaving = ref(false);
+const webMcpError = ref("");
 const mcpHttpLoading = ref(false);
 const mcpHttpSaving = ref(false);
 const mcpHttpError = ref("");
@@ -3544,6 +3729,24 @@ function mcpToolAllowed(name: string): boolean {
 
 function onMcpToolAllowedChange(name: string, allowed: boolean) {
   void saveMcpPolicy({ allowedToolNames: toggleMcpAllowedToolName(mcpAllowedToolNames.value, name, allowed) });
+}
+
+// Entries beyond the static options: discovered plugin tool names and the
+// `dbx_<prefix>__*` / `dbx_*__*` wildcards the backend matcher expands. They
+// are invisible in the checkbox grid, so they render as removable chips.
+const mcpCustomToolEntries = computed(() => customMcpAllowedToolNames(mcpAllowedToolNames.value));
+const mcpCustomToolInput = ref("");
+
+function onMcpCustomToolAdd() {
+  const rawName = mcpCustomToolInput.value;
+  if (!rawName.trim()) return;
+  const { names, added } = addMcpAllowedToolName(mcpAllowedToolNames.value, rawName);
+  mcpCustomToolInput.value = "";
+  if (added) void saveMcpPolicy({ allowedToolNames: names });
+}
+
+function onMcpCustomToolRemove(name: string) {
+  void saveMcpPolicy({ allowedToolNames: toggleMcpAllowedToolName(mcpAllowedToolNames.value, name, false) });
 }
 
 const mcpConnectionPolicyConnections = computed(() => {
@@ -3805,7 +4008,12 @@ async function loadMcpHttpSettings() {
   mcpHttpError.value = "";
   try {
     if (isWeb) {
-      webMcpHttpStatus.value = await loadWebMcpHttpStatus();
+      const status = await loadWebMcpHttpStatus();
+      webMcpHttpStatus.value = status;
+      webMcpEnabledDraft.value = status.enabled;
+      webMcpAllowedHostsText.value = status.allowedHosts.join("\n");
+      webMcpAllowedOriginsText.value = status.allowedOrigins.join("\n");
+      webMcpError.value = "";
       return;
     }
     const [settings, status] = await Promise.all([loadMcpHttpServerSettings(), mcpHttpServerStatus()]);
@@ -3818,6 +4026,41 @@ async function loadMcpHttpSettings() {
     mcpHttpError.value = formatMcpHttpError(error);
   } finally {
     mcpHttpLoading.value = false;
+  }
+}
+
+async function saveWebMcpSettings() {
+  if (webMcpSaving.value || webMcpHttpStatus.value?.deploymentManaged) return;
+  webMcpSaving.value = true;
+  webMcpError.value = "";
+  const settings: WebMcpHttpSettings = {
+    enabled: webMcpEnabledDraft.value,
+    allowedHosts: mcpHttpList(webMcpAllowedHostsText.value),
+    allowedOrigins: mcpHttpList(webMcpAllowedOriginsText.value),
+  };
+  try {
+    const status = await saveWebMcpHttpSettings(settings);
+    webMcpHttpStatus.value = status;
+    webMcpEnabledDraft.value = status.enabled;
+    webMcpAllowedHostsText.value = status.allowedHosts.join("\n");
+    webMcpAllowedOriginsText.value = status.allowedOrigins.join("\n");
+  } catch (error: unknown) {
+    webMcpError.value = formatMcpHttpError(error);
+  } finally {
+    webMcpSaving.value = false;
+  }
+}
+
+async function rotateWebMcpAccessToken() {
+  if (webMcpSaving.value || webMcpHttpStatus.value?.deploymentManaged) return;
+  webMcpSaving.value = true;
+  webMcpError.value = "";
+  try {
+    webMcpHttpStatus.value = await rotateWebMcpToken();
+  } catch (error: unknown) {
+    webMcpError.value = formatMcpHttpError(error);
+  } finally {
+    webMcpSaving.value = false;
   }
 }
 
@@ -3864,6 +4107,9 @@ const mcpLaunchConfig = computed<McpLaunchConfig | undefined>(() => {
     };
   }
   const env = mcpStatus.value?.data_dir ? { DBX_DATA_DIR: mcpStatus.value.data_dir } : undefined;
+  if (mcpStatus.value?.native_bin_path) {
+    return preferMcpNativeLaunch({ command: "dbx-mcp-server", env }, mcpStatus.value.native_bin_path);
+  }
   if (mcpStatus.value?.node_path && mcpStatus.value.script_path) {
     return {
       command: mcpStatus.value.node_path,
@@ -3879,17 +4125,9 @@ const mcpLaunchConfig = computed<McpLaunchConfig | undefined>(() => {
 
 const mcpJsonRecommendedConfig = computed(() => buildMcpJsonConfig(mcpLaunchConfig.value));
 
-const mcpTraeRecommendedConfig = computed(() => {
-  // TRAE currently splits Windows executable paths containing spaces, so bypass Node and launch the native MCP binary directly.
-  const nativeBinPath = !isWeb && isWindows() ? mcpStatus.value?.native_bin_path : undefined;
-  return buildMcpTraeConfig(mcpLaunchConfig.value, nativeBinPath ?? undefined);
-});
+const mcpTraeRecommendedConfig = computed(() => buildMcpTraeConfig(mcpLaunchConfig.value));
 
-const mcpQoderRecommendedConfig = computed(() => {
-  // Qoder follows TRAE's mcpServers JSON format and has the same Windows path parsing limitation.
-  const nativeBinPath = !isWeb && isWindows() ? mcpStatus.value?.native_bin_path : undefined;
-  return buildMcpQoderConfig(mcpLaunchConfig.value, nativeBinPath ?? undefined);
-});
+const mcpQoderRecommendedConfig = computed(() => buildMcpQoderConfig(mcpLaunchConfig.value));
 
 const mcpVsCodeRecommendedConfig = computed(() => buildMcpVsCodeConfig(mcpLaunchConfig.value));
 
@@ -3918,11 +4156,19 @@ const mcpStatusLabel = computed(() => {
 });
 
 const mcpCommand = computed(() => {
-  if (!mcpStatus.value) return "npm install -g @dbx-app/mcp-server@latest";
+  if (!mcpStatus.value) return isWindows() ? 'powershell -NoProfile -Command "irm https://dbxio.com/install-mcp.ps1 | iex"' : "curl -fsSL https://dbxio.com/install-mcp | sh";
   return mcpStatus.value.installed ? mcpStatus.value.update_command : mcpStatus.value.install_command;
 });
 
 const mcpUninstallCommand = computed(() => mcpStatus.value?.uninstall_command || "npm uninstall -g @dbx-app/mcp-server");
+const mcpNativeMigrationAvailable = computed(() => mcpStatus.value?.installation_source === "npm");
+const mcpInstallDisabled = computed(() => mcpInstalling.value || mcpUninstalling.value || Boolean(mcpStatus.value?.installed && !mcpStatus.value.update_available && !mcpNativeMigrationAvailable.value));
+const mcpInstallButtonLabel = computed(() => {
+  if (mcpInstalling.value) return t("settings.mcpInstalling");
+  if (mcpNativeMigrationAvailable.value) return t("settings.mcpSwitchToNativeButton");
+  if (!mcpStatus.value?.installed) return t("settings.mcpInstallButton");
+  return mcpStatus.value.update_available ? t("settings.mcpUpdateButton") : t("settings.mcpUpToDate");
+});
 
 async function refreshMcpStatus() {
   if (mcpStatusLoading.value) return;
@@ -3963,7 +4209,7 @@ async function installMcp() {
   mcpInstallMessage.value = "";
   mcpInstallError.value = false;
   try {
-    const result = await installMcpServer();
+    const result = mcpNativeMigrationAvailable.value || !mcpStatus.value?.installed ? await installNativeMcpServer() : await installMcpServer();
     mcpInstallMessage.value = result;
     mcpInstallError.value = false;
     // 安装成功后刷新状态
@@ -4004,6 +4250,28 @@ async function uninstallMcp() {
   }
 }
 
+async function uninstallNpmMcpFallback() {
+  if (mcpInstalling.value || mcpUninstalling.value || !mcpStatus.value?.npm_installed) return;
+  if (!window.confirm(t("settings.mcpRemoveNpmFallbackConfirm"))) return;
+  mcpUninstalling.value = true;
+  mcpInstallMessage.value = "";
+  mcpInstallError.value = false;
+  try {
+    mcpInstallMessage.value = await uninstallNpmMcpServer();
+    await refreshMcpStatus();
+    notifyComponentUpdatesChanged();
+  } catch (e: any) {
+    mcpInstallMessage.value = t("settings.mcpRemoveNpmFallbackFailed", { error: e?.message || String(e) });
+    mcpInstallError.value = true;
+  } finally {
+    mcpUninstalling.value = false;
+    window.setTimeout(() => {
+      mcpInstallMessage.value = "";
+      mcpInstallError.value = false;
+    }, 3000);
+  }
+}
+
 // ---------- WebDAV Sync ----------
 const webdavEndpoint = ref(localStorage.getItem("dbx-webdav-endpoint") || "");
 const webdavUsername = ref(localStorage.getItem("dbx-webdav-username") || "");
@@ -4019,7 +4287,17 @@ const webdavAutoUploadIntervalMinutes = ref(Number(localStorage.getItem("dbx-web
 const webdavBusy = ref<"" | "test" | "upload" | "download">("");
 const webdavMessage = ref("");
 const webdavError = ref(false);
-const syncMethodTab = ref<"webdav" | "snippet">("webdav");
+const localBackupSecretsPassphrase = ref("");
+const localBackupBusy = ref<"" | "export" | "import">("");
+const localBackupMessage = ref("");
+const localBackupError = ref(false);
+const localBackupPath = ref("");
+const localBackupDirectoryStorageKey = "dbx-local-backup-directory";
+const localBackupDirectory = ref(localStorage.getItem(localBackupDirectoryStorageKey) || "");
+const syncMethodTab = ref<"webdav" | "snippet" | "local">("webdav");
+const syncSelectionOpen = ref(false);
+const syncSelectionMode = ref<"upload" | "restore">("upload");
+const syncSelectionCatalog = ref<SyncSnapshotCatalog | null>(null);
 
 const snippetProvider = ref<SnippetProvider>((localStorage.getItem("dbx-snippet-provider") as SnippetProvider) || "github");
 const snippetInstanceUrl = ref(localStorage.getItem("dbx-gitlab-instance-url") || "https://gitlab.com");
@@ -4041,13 +4319,14 @@ const legacySnippetId = ref("");
 const pendingLegacyCleanupId = ref("");
 const snippetSyncSettingsLoading = ref(true);
 
-const webdavReady = computed(() => !!webdavEndpoint.value.trim() && !webdavBusy.value && (!webdavSyncSecrets.value || !!webdavSecretsPassphrase.value.trim() || webdavHasSavedSecretsPassphrase.value));
+const webdavReady = computed(() => !!webdavEndpoint.value.trim() && !webdavBusy.value);
+const localBackupCanIncludeSecrets = computed(() => !!localBackupSecretsPassphrase.value.trim());
 const snippetReady = computed(() => !snippetSyncSettingsLoading.value && !snippetBusy.value && (snippetProvider.value !== "gitlab" || (!snippetInstanceError.value && snippetInstanceUrl.value === activeSnippetInstanceUrl.value)) && (!!snippetToken.value.trim() || snippetHasSavedToken.value));
-const snippetUploadReady = computed(() => snippetReady.value && !!snippetPassphrase.value.trim() && (!snippetIncludeSecrets.value || !!snippetSecretsPassphrase.value.trim()));
+const snippetUploadReady = computed(() => snippetReady.value && !!snippetPassphrase.value.trim());
 // Legacy plaintext snippets have no outer encryption password. Let the
 // backend require one only after it detects an encrypted envelope so those
 // snapshots remain recoverable for migration.
-const snippetDownloadReady = computed(() => snippetReady.value && (!snippetRestoreSecrets.value || !!snippetSecretsPassphrase.value.trim()));
+const snippetDownloadReady = computed(() => snippetReady.value);
 
 function currentSnippetConfig(replaceLegacySnippet = false): SnippetSyncConfig {
   return {
@@ -4178,13 +4457,10 @@ async function uploadSnippetSnapshot() {
     return;
   }
   await runSnippetAction("upload", async () => {
-    const summary = await snippetSyncUpload(currentSnippetConfig(), settingsStore.editorSettings, snippetPassphrase.value, snippetIncludeSecrets.value, snippetIncludeSecrets.value ? snippetSecretsPassphrase.value : undefined);
-    snippetId.value = summary.snippetId;
-    await persistSnippetSyncId();
-    return t("settings.syncSnippetUploadSuccess", {
-      bytes: summary.bytes,
-      id: summary.snippetId,
-    });
+    syncSelectionCatalog.value = await cloudSyncLocalCatalog(settingsStore.editorSettings);
+    syncSelectionMode.value = "upload";
+    syncSelectionOpen.value = true;
+    return "";
   });
 }
 
@@ -4225,24 +4501,12 @@ async function retryLegacySnippetCleanup() {
 }
 
 async function downloadSnippetSnapshot() {
-  if (!snippetId.value.trim() || !window.confirm(t("settings.syncDownloadConfirm"))) return;
+  if (!snippetId.value.trim()) return;
   await runSnippetAction("download", async () => {
-    const result = await snippetSyncDownload(currentSnippetConfig(), snippetPassphrase.value, snippetRestoreSecrets.value, snippetRestoreSecrets.value ? snippetSecretsPassphrase.value : undefined);
-    if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
-    await settingsStore.updateDesktopSettings(result.desktopSettings);
-    await connectionStore.initFromDisk();
-    await savedSqlStore.initFromStorage();
-    // Snapshot downloads replace backend-managed tunnel profiles, so refresh
-    // the already-loaded Pinia store instead of leaving the UI stale.
-    await tunnelProfileStore.refresh();
-    await settingsStore.reloadAiConfigs();
-    let message = t("settings.syncSnippetDownloadSuccess", {
-      bytes: result.summary.bytes,
-      id: result.summary.snippetId,
-    });
-    if (result.applySummary.encryptedSecretsPresent && !result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsSkipped")}`;
-    if (result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsApplied")}`;
-    return message;
+    syncSelectionCatalog.value = await snippetSyncInspect(currentSnippetConfig(), snippetPassphrase.value || undefined, snippetSecretsPassphrase.value || undefined);
+    syncSelectionMode.value = "restore";
+    syncSelectionOpen.value = true;
+    return "";
   });
 }
 
@@ -4360,37 +4624,182 @@ async function testWebDav() {
 
 async function uploadWebDavSnapshot() {
   await runWebDavAction("upload", async () => {
-    const summary = await webdavSyncUpload(currentWebDavConfig(), settingsStore.editorSettings, webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined, webdavSyncSecrets.value);
-    return t("settings.syncUploadSuccess", {
-      bytes: summary.bytes,
-      path: summary.remotePath,
-    });
+    syncSelectionCatalog.value = await cloudSyncLocalCatalog(settingsStore.editorSettings);
+    syncSelectionMode.value = "upload";
+    syncSelectionOpen.value = true;
+    return "";
   });
 }
 
 async function downloadWebDavSnapshot() {
-  if (!window.confirm(t("settings.syncDownloadConfirm"))) return;
   await runWebDavAction("download", async () => {
-    const result = await webdavSyncDownload(currentWebDavConfig(), webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined, webdavSyncSecrets.value);
-    if (result.editorSettings && typeof result.editorSettings === "object") {
-      settingsStore.updateEditorSettings(result.editorSettings as any);
+    syncSelectionCatalog.value = await webdavSyncInspect(currentWebDavConfig(), webdavSecretsPassphrase.value || undefined);
+    syncSelectionMode.value = "restore";
+    syncSelectionOpen.value = true;
+    return "";
+  });
+}
+
+async function runLocalBackupAction(kind: "export" | "import", action: () => Promise<string>) {
+  localBackupBusy.value = kind;
+  localBackupMessage.value = "";
+  localBackupError.value = false;
+  try {
+    localBackupMessage.value = await action();
+  } catch (error: any) {
+    localBackupMessage.value = error?.message || String(error);
+    localBackupError.value = true;
+  } finally {
+    localBackupBusy.value = "";
+  }
+}
+
+function localBackupFileName() {
+  const now = new Date();
+  const twoDigits = (value: number) => String(value).padStart(2, "0");
+  const timestamp = `${now.getFullYear()}-${twoDigits(now.getMonth() + 1)}-${twoDigits(now.getDate())}_${twoDigits(now.getHours())}-${twoDigits(now.getMinutes())}-${twoDigits(now.getSeconds())}-${String(now.getMilliseconds()).padStart(3, "0")}`;
+  return `dbx-backup_${timestamp}.dbxbackup`;
+}
+
+async function localBackupPathInDirectory(directory: string) {
+  const { join } = await import("@tauri-apps/api/path");
+  return join(directory, localBackupFileName());
+}
+
+async function chooseLocalBackupExport() {
+  await runLocalBackupAction("export", async () => {
+    localBackupPath.value = localBackupDirectory.value ? await localBackupPathInDirectory(localBackupDirectory.value) : "";
+    syncSelectionCatalog.value = await cloudSyncLocalCatalog(settingsStore.editorSettings);
+    syncSelectionMode.value = "upload";
+    syncSelectionOpen.value = true;
+    return "";
+  });
+}
+
+async function chooseLocalBackupPath() {
+  await runLocalBackupAction("export", async () => {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const path = await save({
+      title: t("settings.localBackupExportTitle"),
+      defaultPath: localBackupPath.value || localBackupFileName(),
+      filters: [{ name: t("settings.localBackupFileType"), extensions: ["dbxbackup", "zip"] }],
+    });
+    if (path) {
+      const { dirname } = await import("@tauri-apps/api/path");
+      localBackupPath.value = path;
+      localBackupDirectory.value = await dirname(path);
+      localStorage.setItem(localBackupDirectoryStorageKey, localBackupDirectory.value);
     }
+    return "";
+  });
+}
+
+async function chooseLocalBackupImport() {
+  await runLocalBackupAction("import", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      title: t("settings.localBackupImportTitle"),
+      multiple: false,
+      filters: [{ name: t("settings.localBackupFileType"), extensions: ["dbxbackup", "zip"] }],
+    });
+    if (typeof selected !== "string" || !selected) return "";
+    localBackupPath.value = selected;
+    const catalog = await localBackupInspect(selected, localBackupSecretsPassphrase.value || undefined);
+    if (!localBackupCanIncludeSecrets.value && catalog.hasEncryptedSecrets) {
+      catalog.selection = {
+        ...(catalog.selection ?? {}),
+        connectionSecrets: [],
+        tunnelSecrets: [],
+        aiConfigs: [],
+        pluginUiStorage: [],
+        includeSecrets: false,
+        syncCredentials: false,
+      };
+    }
+    syncSelectionCatalog.value = catalog;
+    syncSelectionMode.value = "restore";
+    syncSelectionOpen.value = true;
+    return "";
+  });
+}
+
+async function confirmSyncSelection(selection: SyncSelection) {
+  if (syncMethodTab.value === "local") {
+    await nextTick();
+    await runLocalBackupAction(syncSelectionMode.value === "upload" ? "export" : "import", async () => {
+      if (selection.includeSecrets && !localBackupCanIncludeSecrets.value) {
+        throw new Error(t("settings.localBackupPassphraseRequired"));
+      }
+      if (syncSelectionMode.value === "upload") {
+        if (!localBackupPath.value) throw new Error(t("settings.localBackupPathRequired"));
+        const summary = await localBackupExport(localBackupPath.value, settingsStore.editorSettings, selection.includeSecrets ? localBackupSecretsPassphrase.value : undefined, selection);
+        return t("settings.localBackupExportSuccess", { bytes: summary.bytes, path: localBackupPath.value });
+      }
+
+      const result = await localBackupImport(localBackupPath.value, selection.includeSecrets ? localBackupSecretsPassphrase.value : undefined, selection.includeSecrets, selection);
+      if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
+      await settingsStore.updateDesktopSettings(result.desktopSettings);
+      await connectionStore.initFromDisk();
+      await savedSqlStore.initFromStorage();
+      await tunnelProfileStore.refresh();
+      await settingsStore.reloadAiConfigs();
+      let message = t("settings.localBackupImportSuccess", { path: localBackupPath.value });
+      if (result.applySummary.encryptedSecretsPresent && !result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsSkipped")}`;
+      if (result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsApplied")}`;
+      return message;
+    });
+    return;
+  }
+
+  if (syncMethodTab.value === "snippet") {
+    if (syncSelectionMode.value === "upload") {
+      snippetIncludeSecrets.value = selection.includeSecrets;
+      await runSnippetAction("upload", async () => {
+        const summary = await snippetSyncUpload(currentSnippetConfig(), settingsStore.editorSettings, snippetPassphrase.value, selection.includeSecrets, selection.includeSecrets ? snippetSecretsPassphrase.value : undefined, selection);
+        snippetId.value = summary.snippetId;
+        await persistSnippetSyncId();
+        return t("settings.syncSnippetUploadSuccess", { bytes: summary.bytes, id: summary.snippetId });
+      });
+      return;
+    }
+    snippetRestoreSecrets.value = selection.includeSecrets;
+    await runSnippetAction("download", async () => {
+      const result = await snippetSyncDownload(currentSnippetConfig(), snippetPassphrase.value, selection.includeSecrets, selection.includeSecrets ? snippetSecretsPassphrase.value : undefined, selection);
+      if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
+      await settingsStore.updateDesktopSettings(result.desktopSettings);
+      await connectionStore.initFromDisk();
+      await savedSqlStore.initFromStorage();
+      await tunnelProfileStore.refresh();
+      await settingsStore.reloadAiConfigs();
+      let message = t("settings.syncSnippetDownloadSuccess", { bytes: result.summary.bytes, id: result.summary.snippetId });
+      if (result.applySummary.encryptedSecretsPresent && !result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsSkipped")}`;
+      if (result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsApplied")}`;
+      return message;
+    });
+    return;
+  }
+
+  webdavSyncSecrets.value = selection.includeSecrets;
+  if (syncSelectionMode.value === "upload") {
+    await runWebDavAction("upload", async () => {
+      const summary = await webdavSyncUpload(currentWebDavConfig(), settingsStore.editorSettings, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
+      writeWebDavBackupSelection(selection);
+      return t("settings.syncUploadSuccess", { bytes: summary.bytes, path: summary.remotePath });
+    });
+    return;
+  }
+
+  await runWebDavAction("download", async () => {
+    const result = await webdavSyncDownload(currentWebDavConfig(), selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
+    if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
     await settingsStore.updateDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
     await savedSqlStore.initFromStorage();
-    // Keep the shared tunnel profile UI consistent with the downloaded snapshot.
     await tunnelProfileStore.refresh();
     await settingsStore.reloadAiConfigs();
-    const message = t("settings.syncDownloadSuccess", {
-      bytes: result.summary.bytes,
-      path: result.summary.remotePath,
-    });
-    if (result.applySummary.encryptedSecretsPresent && !result.applySummary.secretsApplied) {
-      return `${message} ${t("settings.syncSecretsSkipped")}`;
-    }
-    if (result.applySummary.secretsApplied) {
-      return `${message} ${t("settings.syncSecretsApplied")}`;
-    }
+    const message = t("settings.syncDownloadSuccess", { bytes: result.summary.bytes, path: result.summary.remotePath });
+    if (result.applySummary.encryptedSecretsPresent && !result.applySummary.secretsApplied) return `${message} ${t("settings.syncSecretsSkipped")}`;
+    if (result.applySummary.secretsApplied) return `${message} ${t("settings.syncSecretsApplied")}`;
     return message;
   });
 }
@@ -5957,7 +6366,7 @@ onUnmounted(() => {
           </button>
         </nav>
 
-        <div class="min-w-0 flex-1 overflow-visible pl-1 pr-0 flex flex-col">
+        <div class="min-w-0 min-h-0 flex-1 overflow-visible pl-1 pr-0 flex flex-col">
           <div class="shrink-0 px-2 pt-1 pb-3">
             <div ref="settingsSearchInputContainerRef" class="relative">
               <Search class="pointer-events-none absolute top-1/2 left-4 z-10 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -6313,6 +6722,16 @@ onUnmounted(() => {
 
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
+                    <Label for="editor-restore-sql-from-source-paste">{{ t("settings.restoreSqlFromSourcePaste") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.restoreSqlFromSourcePasteDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-restore-sql-from-source-paste" v-model="editRestoreSqlFromSourcePasteEnabled" class="mt-0.5" />
+                </div>
+
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
                     <Label for="editor-insert-space-after-completion">{{ t("settings.insertSpaceAfterCompletion") }}</Label>
                     <p class="text-xs text-muted-foreground">
                       {{ t("settings.insertSpaceAfterCompletionDescription") }}
@@ -6349,6 +6768,25 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
+                </div>
+
+                <div class="settings-item flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-table-completion-schema-qualification>
+                  <div class="min-w-0 space-y-1">
+                    <Label>{{ t("settings.tableCompletionSchemaQualification") }}</Label>
+                    <p class="text-xs leading-tight text-muted-foreground">
+                      {{ tableCompletionSchemaQualificationDescription }}
+                    </p>
+                  </div>
+                  <Select :model-value="editTableCompletionSchemaQualification" @update:model-value="onTableCompletionSchemaQualificationChange">
+                    <SelectTrigger class="h-8 w-44 shrink-0">
+                      <SelectValue :placeholder="t('settings.tableCompletionSchemaQualification')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="never">{{ t("settings.tableCompletionSchemaQualificationNever") }}</SelectItem>
+                      <SelectItem value="collision">{{ t("settings.tableCompletionSchemaQualificationCollision") }}</SelectItem>
+                      <SelectItem value="always">{{ t("settings.tableCompletionSchemaQualificationAlways") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
 
@@ -6397,6 +6835,24 @@ onUnmounted(() => {
                     <SelectContent>
                       <SelectItem value="dialog">{{ t("settings.ddlOpenModeDialog") }}</SelectItem>
                       <SelectItem value="tab">{{ t("settings.ddlOpenModeTab") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-double-click-string">{{ t("settings.doubleClickStringSelectionMode") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.doubleClickStringSelectionModeDescription") }}</p>
+                  </div>
+                  <Select :model-value="editDoubleClickStringSelectionMode" @update:model-value="setDoubleClickStringSelectionMode">
+                    <!-- The option labels are long in several languages; let the trigger hug its value
+                         (bounded) instead of clipping it at a fixed width. -->
+                    <SelectTrigger id="editor-double-click-string" class="h-8 min-w-36 max-w-[13rem] shrink-0">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="content">{{ t("settings.doubleClickStringSelectionModeContent") }}</SelectItem>
+                      <SelectItem value="word">{{ t("settings.doubleClickStringSelectionModeWord") }}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -6525,7 +6981,7 @@ onUnmounted(() => {
                     <div class="text-sm font-medium text-muted-foreground">
                       {{ t("settings.sqlVariableSyntax") }}
                     </div>
-                    <p class="text-xs text-muted-foreground">
+                    <p v-if="editSqlVariableSyntaxDatabaseType !== 'neo4j'" class="text-xs text-muted-foreground">
                       {{ t("settings.sqlVariableSyntaxDescription") }}
                     </p>
                   </div>
@@ -6559,7 +7015,13 @@ onUnmounted(() => {
                         {{ t(`settings.sqlVariableSyntax_${key}Description`) }}
                       </p>
                     </div>
-                    <Switch :id="`sql-var-syntax-${key}`" :model-value="sqlVariableSyntaxToggle(key)" :disabled="!editSqlVariableSubstitutionEnabled" class="mt-0.5 shrink-0" @update:model-value="(value) => setSqlVariableSyntaxToggle(key, value as boolean)" />
+                    <Switch
+                      :id="`sql-var-syntax-${key}`"
+                      :model-value="sqlVariableSyntaxToggle(key)"
+                      :disabled="!editSqlVariableSubstitutionEnabled || (['neo4j', 'nebula'].includes(editSqlVariableSyntaxDatabaseType) && key === 'named')"
+                      class="mt-0.5 shrink-0"
+                      @update:model-value="(value) => setSqlVariableSyntaxToggle(key, value as boolean)"
+                    />
                   </div>
                 </div>
               </div>
@@ -6967,6 +7429,14 @@ onUnmounted(() => {
                 </div>
               </div>
 
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="colorize-connection-tabs">{{ t("settings.colorizeConnectionTabs") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.colorizeConnectionTabsDescription") }}</p>
+                </div>
+                <Switch id="colorize-connection-tabs" v-model="editColorizeConnectionTabs" />
+              </div>
+
               <div class="settings-appearance-group">
                 <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
                   <div class="space-y-2">
@@ -7345,6 +7815,15 @@ onUnmounted(() => {
               </div>
               <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
+                  <Label for="sidebar-search-opened-databases-only">{{ t("settings.sidebarSearchOpenedDatabasesOnly") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarSearchOpenedDatabasesOnly')">
+                    {{ t("settings.sidebarSearchOpenedDatabasesOnlyDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-search-opened-databases-only" v-model="editSidebarSearchOpenedDatabasesOnly" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
                   <Label for="auto-select-active-sidebar-node">{{ t("settings.autoSelectActiveSidebarNode") }}</Label>
                   <HelpTooltip :label="t('settings.autoSelectActiveSidebarNode')">
                     {{ t("settings.autoSelectActiveSidebarNodeDescription") }}
@@ -7605,11 +8084,13 @@ onUnmounted(() => {
 
             <!-- Data Tab -->
             <section v-else-if="activeSettingsTab === 'data'" data-settings-search-id="data" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('data')]">
-              <div data-settings-search-id="history-retention" :class="['space-y-2', settingsSearchTargetClass('history-retention')]">
-                <Label for="history-retention-limit">{{ t("settings.historyRetentionLimit") }}</Label>
-                <p class="text-xs text-muted-foreground">{{ t("settings.historyRetentionDescription") }}</p>
+              <div data-settings-search-id="history-retention" :class="['flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('history-retention')]">
+                <div class="min-w-0 space-y-1">
+                  <Label for="history-retention-limit">{{ t("settings.historyRetentionLimit") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.historyRetentionDescription") }}</p>
+                </div>
                 <Select :model-value="String(editHistoryRetentionLimit)" :disabled="!historyRetentionLoaded || historyRetentionSaving" @update:model-value="(value) => (editHistoryRetentionLimit = Number(value))">
-                  <SelectTrigger id="history-retention-limit" class="w-40"><SelectValue /></SelectTrigger>
+                  <SelectTrigger id="history-retention-limit" class="w-40 shrink-0"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem v-for="limit in HISTORY_RETENTION_LIMITS" :key="limit" :value="String(limit)">{{ limit === 0 ? t("settings.historyRetentionUnlimited") : String(limit) }}</SelectItem>
                   </SelectContent>
@@ -7618,6 +8099,28 @@ onUnmounted(() => {
                 <div v-if="historyRetentionLoadError" class="flex items-center gap-2 text-xs text-destructive" role="alert">
                   <span>{{ t("settings.historyRetentionLoadFailed", { error: historyRetentionLoadError }) }}</span>
                   <Button type="button" variant="outline" size="sm" @click="historyRetention.load">{{ t("common.retry") }}</Button>
+                </div>
+              </div>
+              <div data-settings-search-id="mcp-history-retention" :class="['flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('mcp-history-retention')]">
+                <div class="min-w-0 space-y-1">
+                  <Label for="mcp-history-retention-limit">{{ t("settings.mcpHistoryRetentionLimit") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.mcpHistoryRetentionDescription") }}</p>
+                </div>
+                <div class="flex shrink-0 items-center gap-2">
+                  <Select :model-value="String(editMcpHistoryRetentionLimit)" :disabled="!mcpHistoryRetentionLoaded || mcpHistoryRetentionSaving" @update:model-value="(value) => (editMcpHistoryRetentionLimit = Number(value))">
+                    <SelectTrigger id="mcp-history-retention-limit" class="w-40"><SelectValue /></SelectTrigger>
+                    <SelectContent
+                      ><SelectItem v-for="limit in HISTORY_RETENTION_LIMITS" :key="limit" :value="String(limit)">{{ limit === 0 ? t("settings.historyRetentionUnlimited") : String(limit) }}</SelectItem></SelectContent
+                    >
+                  </Select>
+                  <p v-if="mcpHistoryRetentionLoading" class="text-xs text-muted-foreground">{{ t("common.loading") }}</p>
+                  <div v-if="mcpHistoryRetentionLoadError" class="flex items-center gap-2 text-xs text-destructive" role="alert">
+                    <span>{{ t("settings.historyRetentionLoadFailed", { error: mcpHistoryRetentionLoadError }) }}</span>
+                    <Button type="button" variant="outline" size="sm" @click="mcpHistoryRetention.load">{{ t("common.retry") }}</Button>
+                  </div>
+                  <Button type="button" variant="outline" size="sm" :disabled="mcpHistoryCleanupLoading || !mcpHistoryRetentionLoaded" @click="cleanupMcpHistory">
+                    {{ mcpHistoryCleanupLoading ? t("common.loading") : t("settings.mcpHistoryCleanup") }}
+                  </Button>
                 </div>
               </div>
               <div id="data-grid-toolbar-layout" data-settings-search-id="data-grid-toolbar-layout" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('data-grid-toolbar-layout')]">
@@ -8267,6 +8770,23 @@ onUnmounted(() => {
                     </SelectContent>
                   </Select>
                 </div>
+                <div class="flex items-start justify-between gap-4">
+                  <div class="min-w-0 space-y-0.5">
+                    <Label for="csv-null-mode">{{ t("settings.csvNullMode") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.csvNullModeDescription") }}
+                    </p>
+                  </div>
+                  <Select v-model="editCsvNullMode">
+                    <SelectTrigger id="csv-null-mode" class="h-8 w-44 shrink-0">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="marker">{{ t("settings.csvNullModeMarker") }}</SelectItem>
+                      <SelectItem value="empty">{{ t("settings.csvNullModeEmpty") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div class="space-y-2">
                   <Label>{{ t("settings.exportBatchSize") }}</Label>
                   <div class="flex items-center gap-3">
@@ -8757,9 +9277,10 @@ LIMIT 100;</pre
 
             <section v-else-if="activeSettingsTab === 'sync'" data-settings-search-id="sync" :class="['py-2', settingsSearchTargetClass('sync')]">
               <Tabs v-model="syncMethodTab" class="w-full">
-                <TabsList v-if="!isWeb" class="grid w-full grid-cols-2">
+                <TabsList v-if="!isWeb" class="grid w-full grid-cols-3">
                   <TabsTrigger value="webdav">WebDAV</TabsTrigger>
                   <TabsTrigger value="snippet">{{ t("settings.syncSnippetTitle") }}</TabsTrigger>
+                  <TabsTrigger value="local">{{ t("settings.localBackupTitle") }}</TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="webdav" data-settings-search-id="sync-webdav" :class="['mt-5 space-y-5', settingsSearchTargetClass('sync-webdav')]">
@@ -8986,9 +9507,46 @@ LIMIT 100;</pre
                     </div>
                   </div>
                 </TabsContent>
+
+                <TabsContent v-if="!isWeb" value="local" data-settings-search-id="sync-local" :class="['mt-5 space-y-5', settingsSearchTargetClass('sync-local')]">
+                  <div class="space-y-1">
+                    <div class="flex items-center gap-2 text-sm font-medium">
+                      <HardDrive class="h-4 w-4 text-muted-foreground" />
+                      {{ t("settings.localBackupTitle") }}
+                    </div>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.localBackupDescription") }}
+                    </p>
+                  </div>
+
+                  <div class="grid gap-4 rounded-md border p-4 md:grid-cols-2">
+                    <div class="space-y-2 md:col-span-2">
+                      <Label for="local-backup-secrets-passphrase">{{ t("settings.syncSecretsPassphrase") }}</Label>
+                      <PasswordInput id="local-backup-secrets-passphrase" v-model="localBackupSecretsPassphrase" autocomplete="new-password" />
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.localBackupPassphraseDescription") }}
+                      </p>
+                    </div>
+                    <div v-if="localBackupMessage" class="text-xs md:col-span-2" :class="localBackupError ? 'text-destructive' : 'text-green-600 dark:text-green-400'">
+                      {{ localBackupMessage }}
+                    </div>
+                    <div class="flex flex-wrap justify-end gap-2 md:col-span-2">
+                      <Button variant="outline" size="sm" :disabled="!!localBackupBusy" @click="chooseLocalBackupImport">
+                        <Loader2 v-if="localBackupBusy === 'import'" class="mr-1 h-3 w-3 animate-spin" />
+                        <Download v-else class="mr-1 h-3 w-3" />
+                        {{ t("settings.localBackupImport") }}
+                      </Button>
+                      <Button size="sm" :disabled="!!localBackupBusy" @click="chooseLocalBackupExport">
+                        <Loader2 v-if="localBackupBusy === 'export'" class="mr-1 h-3 w-3 animate-spin" />
+                        <Upload v-else class="mr-1 h-3 w-3" />
+                        {{ t("settings.localBackupExport") }}
+                      </Button>
+                    </div>
+                  </div>
+                </TabsContent>
               </Tabs>
 
-              <div class="settings-item mt-5 space-y-3 rounded-md border bg-muted/20 px-3 py-3">
+              <div v-if="syncMethodTab !== 'local'" class="settings-item mt-5 space-y-3 rounded-md border bg-muted/20 px-3 py-3">
                 <div class="flex items-center justify-between gap-4">
                   <div class="space-y-1">
                     <Label for="sync-secrets">{{ t("settings.syncSecrets") }}</Label>
@@ -9023,6 +9581,17 @@ LIMIT 100;</pre
                   </p>
                 </div>
               </div>
+              <CloudSyncSelectionDialog
+                v-model:open="syncSelectionOpen"
+                :mode="syncSelectionMode"
+                :catalog="syncSelectionCatalog"
+                :default-include-secrets="syncMethodTab === 'snippet' ? snippetIncludeSecrets : syncMethodTab === 'local' ? localBackupCanIncludeSecrets : webdavSyncSecrets"
+                :secrets-passphrase-available="syncMethodTab !== 'local' || localBackupCanIncludeSecrets"
+                :show-local-export-path="syncMethodTab === 'local' && syncSelectionMode === 'upload'"
+                :local-export-path="localBackupPath"
+                @choose-local-export-path="chooseLocalBackupPath"
+                @confirm="confirmSyncSelection"
+              />
             </section>
 
             <!-- AI Settings Tab -->
@@ -9073,6 +9642,80 @@ LIMIT 100;</pre
                       <Button type="button" size="sm" variant="ghost" class="text-destructive" @click="aiDeleteConfig(config.id)">
                         {{ t("common.delete") }}
                       </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="aiConfigListMode === 'list'" data-settings-search-id="ai-typography" class="space-y-3">
+                <Separator />
+                <div class="settings-item space-y-3 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="space-y-1">
+                      <h3 class="text-sm font-medium">{{ t("ai.conversationTypography") }}</h3>
+                      <p class="text-xs text-muted-foreground">{{ t("ai.conversationTypographyDescription") }}</p>
+                    </div>
+                    <Button type="button" size="sm" variant="ghost" class="h-7 shrink-0 gap-1 px-2 text-xs" :disabled="aiTypographySaving || (editAiFontFamily === AI_CONVERSATION_FONT_FAMILY_DEFAULT && Number(editAiFontSize) === AI_CONVERSATION_FONT_SIZE_DEFAULT)" @click="resetAiTypography">
+                      <RotateCcw class="h-3.5 w-3.5" />
+                      {{ t("settings.reset") }}
+                    </Button>
+                  </div>
+                  <div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem]">
+                    <div class="min-w-0 space-y-1.5">
+                      <Label>{{ t("ai.conversationFontFamily") }}</Label>
+                      <SearchableSelect
+                        :model-value="editAiFontFamily"
+                        :options="aiFontOptions"
+                        :placeholder="t('ai.conversationFontFollowInterface')"
+                        :search-placeholder="t('settings.searchFont')"
+                        :empty-text="t('settings.noFontsFound')"
+                        :loading-text="t('settings.loadingFonts')"
+                        :disabled="aiTypographySaving"
+                        allow-custom
+                        clearable
+                        :display-name="displayAiFontFamily"
+                        :normalize-custom="normalizeAiConversationFontFamilyInput"
+                        :trigger-class="appearanceFontSearchTriggerClass"
+                        :trigger-icon-class="appearanceFontSearchTriggerIconClass"
+                        content-class="w-[var(--reka-popover-trigger-width)] min-w-[260px]"
+                        @update:model-value="onAiFontFamilyChange"
+                        @update:open="(open: boolean) => open && loadSystemFontOptions()"
+                      >
+                        <template #trigger-label="{ label, loading }">
+                          <span class="truncate" :style="editAiFontFamily ? { fontFamily: editAiFontFamily } : undefined">
+                            {{ loading ? t("settings.loadingFonts") : label }}
+                          </span>
+                        </template>
+                        <template #option-label="{ option, label }">
+                          <span class="truncate" :style="fontOptionStyle(option, editAiFontFamily)">{{ label }}</span>
+                        </template>
+                        <template #custom-option-label="{ value }">
+                          <span class="truncate" :style="{ fontFamily: value }">
+                            {{ t("settings.useCustomFont", { font: readableFontFamily(value) }) }}
+                          </span>
+                        </template>
+                      </SearchableSelect>
+                    </div>
+                    <div class="space-y-1.5">
+                      <Label for="ai-conversation-font-size">{{ t("ai.conversationFontSize") }}</Label>
+                      <div class="flex items-center gap-2">
+                        <Input
+                          id="ai-conversation-font-size"
+                          v-model.number="editAiFontSize"
+                          type="number"
+                          :min="AI_CONVERSATION_FONT_SIZE_MIN"
+                          :max="AI_CONVERSATION_FONT_SIZE_MAX"
+                          step="1"
+                          class="h-8 text-xs"
+                          :disabled="aiTypographySaving"
+                          @change="commitAiFontSize"
+                          @keydown.enter="blurAiFontSizeInput"
+                        />
+                        <span class="text-xs text-muted-foreground">px</span>
+                      </div>
+                      <p class="text-[11px] text-muted-foreground">
+                        {{ t("ai.conversationFontSizeRange", { min: AI_CONVERSATION_FONT_SIZE_MIN, max: AI_CONVERSATION_FONT_SIZE_MAX }) }}
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -9709,25 +10352,63 @@ LIMIT 100;</pre
                       </TabsList>
                       <TabsContent value="http" class="m-0 space-y-4">
                         <div v-if="isWeb" class="space-y-4">
-                          <div class="rounded-md border bg-muted/20 p-4 space-y-2">
+                          <div class="space-y-3 border-t border-border/60 pt-3">
                             <div class="flex items-center justify-between gap-3">
                               <Label class="text-base">{{ t("settings.mcpHttpWebServiceTitle") }}</Label>
                               <Badge :variant="webMcpHttpStatus?.enabled ? 'default' : 'outline'">{{ webMcpHttpStatus?.enabled ? t("settings.mcpHttpStatusLabelEnabled") : t("settings.mcpHttpStatusLabelDisabled") }}</Badge>
                             </div>
                             <p class="text-xs text-muted-foreground">{{ t("settings.mcpHttpWebServiceDescription") }}</p>
+                            <p v-if="mcpHttpError" class="text-xs text-destructive">{{ mcpHttpError }}</p>
                             <template v-if="webMcpHttpStatus">
-                              <code class="block rounded border bg-background px-2 py-1.5 text-xs">{{ webMcpEndpoint }}</code>
+                              <p v-if="!webMcpHttpStatus.enabled" class="text-xs text-muted-foreground">{{ t("settings.mcpHttpWebDisabledHint") }}</p>
+                              <code v-else class="block overflow-x-auto rounded border bg-background px-2 py-1.5 text-xs">{{ webMcpEndpoint }}</code>
                               <p class="text-[11px] text-muted-foreground">
                                 {{
                                   t("settings.mcpHttpWebTokenSourceAndHosts", {
-                                    tokenSource: webMcpHttpStatus.tokenSource || t("settings.mcpHttpNotConfigured"),
+                                    tokenSource: webMcpHttpStatus.tokenSource === "managed" ? t("settings.mcpHttpWebManagedTokenSource") : webMcpHttpStatus.tokenSource || t("settings.mcpHttpNotConfigured"),
                                     hosts: webMcpHttpStatus.allowedHosts.join(", ") || t("settings.mcpHttpNotConfigured"),
                                   })
                                 }}
                               </p>
                               <p v-if="webMcpHttpStatus.allowedOrigins.length" class="text-[11px] text-muted-foreground">{{ t("settings.mcpHttpWebAllowedOrigins", { origins: webMcpHttpStatus.allowedOrigins.join(", ") }) }}</p>
+                              <p v-if="webMcpHttpStatus.deploymentManaged" class="text-xs text-muted-foreground">{{ t("settings.mcpHttpWebDeploymentManaged") }}</p>
+                              <p v-else-if="!webMcpHttpStatus.managementAvailable" class="text-xs text-muted-foreground">{{ t("settings.mcpHttpWebPasswordRequired") }}</p>
+                              <template v-else>
+                                <div class="flex items-center justify-between gap-3 border-t border-border/60 pt-3">
+                                  <Label for="web-mcp-enabled" class="text-sm">{{ t("settings.mcpHttpWebEnableLabel") }}</Label>
+                                  <Switch id="web-mcp-enabled" v-model="webMcpEnabledDraft" :disabled="webMcpSaving" />
+                                </div>
+                                <div class="space-y-1.5">
+                                  <Label for="web-mcp-hosts">{{ t("settings.mcpHttpAllowedHostsLabel") }}</Label>
+                                  <textarea id="web-mcp-hosts" v-model="webMcpAllowedHostsText" rows="2" :disabled="webMcpSaving" class="min-h-16 w-full rounded-md border bg-background px-3 py-2 font-mono text-xs" placeholder="192.168.0.77:4224" />
+                                  <p class="text-[11px] text-muted-foreground">{{ t("settings.mcpHttpHostsHint") }}</p>
+                                </div>
+                                <div class="space-y-1.5">
+                                  <Label for="web-mcp-origins">{{ t("settings.mcpHttpAllowedOriginsLabel") }}</Label>
+                                  <textarea id="web-mcp-origins" v-model="webMcpAllowedOriginsText" rows="2" :disabled="webMcpSaving" class="min-h-16 w-full rounded-md border bg-background px-3 py-2 font-mono text-xs" placeholder="https://mcp-client.example.com" />
+                                  <p class="text-[11px] text-muted-foreground">{{ t("settings.mcpHttpWebOriginsHint") }}</p>
+                                </div>
+                                <div v-if="webMcpHttpStatus.enabled && webMcpHttpStatus.accessToken" class="space-y-1.5">
+                                  <div class="flex items-center justify-between gap-2">
+                                    <Label>Bearer Token</Label>
+                                    <Button type="button" variant="outline" size="sm" :disabled="webMcpSaving" @click="rotateWebMcpAccessToken">{{ t("settings.mcpHttpRotateToken") }}</Button>
+                                  </div>
+                                  <div class="flex min-w-0 items-center gap-2">
+                                    <code class="min-w-0 flex-1 overflow-x-auto rounded border bg-background px-2 py-1.5 text-xs">{{ webMcpHttpStatus.accessToken }}</code>
+                                    <Button type="button" variant="outline" size="icon" :title="t('common.copy')" @click="copyMcpText('http-token', webMcpHttpStatus.accessToken || '')">
+                                      <CheckCircle2 v-if="mcpCopied === 'http-token'" class="h-3.5 w-3.5 text-green-500" />
+                                      <Copy v-else class="h-3.5 w-3.5" />
+                                    </Button>
+                                  </div>
+                                </div>
+                                <p v-if="webMcpError" class="text-xs text-destructive">{{ webMcpError }}</p>
+                                <div class="flex flex-wrap justify-end gap-2">
+                                  <Button type="button" variant="outline" size="sm" :disabled="mcpHttpLoading || webMcpSaving" @click="loadMcpHttpSettings">{{ t("settings.mcpHttpReloadStatus") }}</Button>
+                                  <Button type="button" size="sm" :disabled="webMcpSaving || (webMcpEnabledDraft && !mcpHttpList(webMcpAllowedHostsText).length)" @click="saveWebMcpSettings">{{ t("settings.mcpHttpWebSave") }}</Button>
+                                </div>
+                              </template>
                             </template>
-                            <Button type="button" variant="outline" size="sm" :disabled="mcpHttpLoading" @click="loadMcpHttpSettings">{{ t("settings.mcpHttpReloadStatus") }}</Button>
+                            <Button v-if="!webMcpHttpStatus || webMcpHttpStatus.deploymentManaged" type="button" variant="outline" size="sm" :disabled="mcpHttpLoading" @click="loadMcpHttpSettings">{{ t("settings.mcpHttpReloadStatus") }}</Button>
                           </div>
                         </div>
 
@@ -9738,7 +10419,7 @@ LIMIT 100;</pre
                                 <div class="flex items-center gap-2">
                                   <Label class="text-base">{{ t("settings.mcpHttpServiceTitle") }}</Label>
                                   <Badge :variant="mcpHttpStatus?.running ? 'default' : 'outline'">
-                                    {{ mcpHttpStatus?.running ? t("settings.mcpHttpStatusLabelRunning") : mcpHttpSettings.enabled ? t("settings.mcpHttpStatusLabelPending") : t("settings.mcpHttpStatusLabelDisabled") }}
+                                    {{ mcpHttpStatus?.running ? t("settings.mcpHttpStatusLabelRunning") : mcpHttpSettings.enabled ? t("settings.mcpHttpStatusLabelNotRunning") : t("settings.mcpHttpStatusLabelDisabled") }}
                                   </Badge>
                                 </div>
                                 <p class="text-xs leading-relaxed text-muted-foreground">{{ t("settings.mcpHttpServiceDescription") }}</p>
@@ -9804,10 +10485,9 @@ LIMIT 100;</pre
                                 {{ mcpHttpHasUnsavedChanges ? t("settings.mcpHttpUnsavedChangesHint") : t("settings.mcpHttpSaveHint") }}
                               </p>
                               <div class="flex shrink-0 justify-end gap-2">
-                                <Button type="button" variant="outline" :disabled="mcpHttpLoading || mcpHttpSaving" @click="loadMcpHttpSettings">{{ t("settings.mcpHttpReload") }}</Button>
                                 <Button type="button" :disabled="mcpHttpLoading || mcpHttpSaving || Boolean(mcpHttpDraftValidationError)" @click="saveMcpHttpSettings">
                                   <Loader2 v-if="mcpHttpSaving" class="mr-2 h-4 w-4 animate-spin" />
-                                  {{ t("settings.mcpHttpSaveAndStart") }}
+                                  {{ t("settings.mcpHttpApply") }}
                                 </Button>
                               </div>
                             </div>
@@ -9816,10 +10496,9 @@ LIMIT 100;</pre
                           <div v-else class="flex flex-col gap-3 rounded-md border border-dashed px-4 py-3 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
                             <p>{{ t("settings.mcpHttpDisabledHint") }}</p>
                             <div class="flex shrink-0 justify-end gap-2">
-                              <Button type="button" variant="outline" :disabled="mcpHttpLoading || mcpHttpSaving" @click="loadMcpHttpSettings">{{ t("settings.mcpHttpReload") }}</Button>
                               <Button type="button" :disabled="mcpHttpLoading || mcpHttpSaving" @click="saveMcpHttpSettings">
                                 <Loader2 v-if="mcpHttpSaving" class="mr-2 h-4 w-4 animate-spin" />
-                                {{ t("settings.mcpHttpSaveAndStop") }}
+                                {{ t("settings.mcpHttpApply") }}
                               </Button>
                             </div>
                           </div>
@@ -9923,7 +10602,10 @@ LIMIT 100;</pre
                         </div>
 
                         <div v-if="!isWeb" class="space-y-2">
-                          <Label>{{ mcpStatus?.installed ? t("settings.mcpUpdateCommand") : t("settings.mcpInstallCommand") }}</Label>
+                          <Label>{{ mcpStatus?.installed && !mcpNativeMigrationAvailable ? t("settings.mcpUpdateCommand") : t("settings.mcpInstallCommand") }}</Label>
+                          <p v-if="mcpNativeMigrationAvailable" class="rounded-md border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-xs text-blue-700 dark:text-blue-300">
+                            {{ t("settings.mcpNativeMigrationHint") }}
+                          </p>
                           <div class="flex min-w-0 items-center gap-2">
                             <div class="min-w-0 flex-1 overflow-x-auto rounded-md border bg-background px-3 py-2 font-mono text-xs whitespace-nowrap">
                               {{ mcpCommand }}
@@ -9932,10 +10614,10 @@ LIMIT 100;</pre
                               <CheckCircle2 v-if="mcpCopied === 'install'" class="h-4 w-4 text-green-500" />
                               <Copy v-else class="h-4 w-4" />
                             </Button>
-                            <Button type="button" variant="default" :disabled="mcpInstalling || mcpUninstalling || !mcpStatus?.npm_available || (mcpStatus?.installed && !mcpStatus?.update_available)" @click="installMcp">
+                            <Button type="button" variant="default" :disabled="mcpInstallDisabled" @click="installMcp">
                               <Loader2 v-if="mcpInstalling" class="mr-2 h-4 w-4 animate-spin" />
-                              <CheckCircle2 v-if="!mcpInstalling && mcpStatus?.installed && !mcpStatus?.update_available" class="mr-2 h-4 w-4" />
-                              {{ mcpInstalling ? t("settings.mcpInstalling") : !mcpStatus?.installed ? t("settings.mcpInstallButton") : mcpStatus?.update_available ? t("settings.mcpUpdateButton") : t("settings.mcpUpToDate") }}
+                              <CheckCircle2 v-if="!mcpInstalling && mcpStatus?.installed && !mcpStatus?.update_available && !mcpNativeMigrationAvailable" class="mr-2 h-4 w-4" />
+                              {{ mcpInstallButtonLabel }}
                             </Button>
                           </div>
                           <div
@@ -9959,10 +10641,23 @@ LIMIT 100;</pre
                               <CheckCircle2 v-if="mcpCopied === 'uninstall'" class="h-4 w-4 text-green-500" />
                               <Copy v-else class="h-4 w-4" />
                             </Button>
-                            <Button type="button" variant="outline" class="text-destructive hover:text-destructive" :disabled="mcpInstalling || mcpUninstalling || !mcpStatus.npm_available" @click="uninstallMcp">
+                            <Button type="button" variant="outline" class="text-destructive hover:text-destructive" :disabled="mcpInstalling || mcpUninstalling" @click="uninstallMcp">
                               <Loader2 v-if="mcpUninstalling" class="mr-2 h-4 w-4 animate-spin" />
                               <Trash2 v-else class="mr-2 h-4 w-4" />
                               {{ mcpUninstalling ? t("settings.mcpUninstalling") : t("settings.mcpUninstallButton") }}
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div v-if="!isWeb && mcpStatus?.installation_source !== 'npm' && mcpStatus?.npm_installed" class="rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
+                          <div class="flex flex-wrap items-center justify-between gap-3">
+                            <p class="min-w-0 flex-1 text-xs text-amber-800 dark:text-amber-200">
+                              {{ t("settings.mcpNpmFallbackHint") }}
+                            </p>
+                            <Button type="button" variant="outline" size="sm" :disabled="mcpInstalling || mcpUninstalling" @click="uninstallNpmMcpFallback">
+                              <Loader2 v-if="mcpUninstalling" class="mr-2 h-4 w-4 animate-spin" />
+                              <Trash2 v-else class="mr-2 h-4 w-4" />
+                              {{ t("settings.mcpRemoveNpmFallbackButton") }}
                             </Button>
                           </div>
                         </div>
@@ -10117,6 +10812,21 @@ LIMIT 100;</pre
                               <input type="checkbox" :checked="mcpToolAllowed(tool.name)" :disabled="mcpPolicyControlsDisabled" @change="onMcpToolAllowedChange(tool.name, ($event.target as HTMLInputElement).checked)" />
                               <span>{{ t(tool.labelKey) }}</span>
                             </label>
+                          </div>
+                          <div class="space-y-2">
+                            <div class="flex gap-2">
+                              <Input v-model="mcpCustomToolInput" class="h-8 flex-1 font-mono text-xs" :placeholder="t('settings.mcpToolCustomPlaceholder')" :disabled="mcpPolicyControlsDisabled" spellcheck="false" @keydown.enter.prevent="onMcpCustomToolAdd" />
+                              <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="mcpPolicyControlsDisabled || !mcpCustomToolInput.trim()" @click="onMcpCustomToolAdd">{{ t("settings.mcpToolCustomAdd") }}</Button>
+                            </div>
+                            <p class="text-xs text-muted-foreground">{{ t("settings.mcpToolCustomHint") }}</p>
+                            <div v-if="mcpCustomToolEntries.length" class="flex flex-wrap gap-1.5">
+                              <span v-for="name in mcpCustomToolEntries" :key="name" class="flex items-center gap-1 rounded border bg-background px-2 py-1 font-mono text-xs">
+                                {{ name }}
+                                <button type="button" class="text-muted-foreground transition-colors hover:text-destructive" :disabled="mcpPolicyControlsDisabled" :aria-label="t('settings.mcpToolCustomRemove')" @click="onMcpCustomToolRemove(name)">
+                                  <X class="size-3" />
+                                </button>
+                              </span>
+                            </div>
                           </div>
                         </section>
                       </div>
@@ -10378,7 +11088,7 @@ LIMIT 100;</pre
 
                   <div v-if="mcpTransportTab === 'stdio'" class="flex items-center gap-2 text-xs text-muted-foreground">
                     <Terminal class="h-3.5 w-3.5" />
-                    <span>{{ t("settings.mcpDetectionTiming") }} {{ t("settings.mcpNpmBoundary") }}</span>
+                    <span>{{ t("settings.mcpDetectionTiming") }} {{ t("settings.mcpNativeManagementBoundary") }}</span>
                   </div>
                 </div>
               </Tabs>

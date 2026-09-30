@@ -44,6 +44,7 @@ import type { NacosAdminConfig, NacosApiPlane, NacosAuthConfig, NacosImplementat
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
+import { insertSqliteRemoteTransportLayer, isSqliteRemoteTransportLayerType, sqliteRemoteTransportError } from "@/lib/connection/sqliteRemoteTransport";
 import { sanitizeConnectionCredentials } from "@/lib/connection/credentialSanitizer";
 import { applySshAuthMethod, inferSshAuthMethod } from "@/lib/connection/sshAuthMethod";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
@@ -101,7 +102,8 @@ import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage,
 import { consulAgentAddressesMatch } from "@/lib/consul/agentTarget";
 import { appendConnectionErrorHints, isJdbcMissingRuntimeDependencyError } from "@/lib/connection/connectionErrorHints";
 import { buildCassandraExternalConfig, cassandraTlsConfigFromExternalConfig, type CassandraTlsConfig } from "@/lib/connection/cassandraTlsOptions";
-import { preventDialogDocumentSelectAll } from "@/lib/connection/dialogTextSelection";
+import { savedMysqlTlsFormFields, supportsMysqlTlsOptions as mysqlTlsOptionsSupported, supportsMysqlTlsTab } from "@/lib/connection/mysqlTlsCapabilities";
+import { copyDialogPasswordFieldValue, preventDialogDocumentSelectAll } from "@/lib/connection/dialogTextSelection";
 import { postgresLegacyTlsEnabled, postgresTlsModeForForm, setPostgresLegacyTlsEnabled } from "@/lib/connection/postgresTlsMode";
 import { buildMqKafkaConnectionExtra, mqKafkaConnectionTarget, resolveMqKafkaConnectionSource, type MqKafkaConnectionSource } from "@/lib/connection/mqKafkaConnection";
 import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "@/lib/connection/databaseCategoryOptions";
@@ -145,10 +147,11 @@ import {
   Trash2,
 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
-import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
-import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
+import { resolveVisibleDatabaseSaveAction } from "@/components/sidebar/visibleDatabasesDialogState";
+import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
+import { isSchemaAware, isSingleDatabase, supportsDataDictionary } from "@/lib/database/databaseFeatureSupport";
 import { normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
-import { databaseConnectionFormKind } from "@/lib/database/databaseDriverManifest";
+import { databaseConnectionFormKind, databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import CloudflareD1ConnectionFields from "@/components/connection/CloudflareD1ConnectionFields.vue";
 import SpannerConnectionFields from "@/components/connection/SpannerConnectionFields.vue";
@@ -229,6 +232,7 @@ const DREMIO_ARROW_FLIGHT_SQL_JDBC_DRIVER_CLASS = "org.apache.arrow.driver.jdbc.
 const DREMIO_LEGACY_JDBC_URL = "jdbc:dremio:direct=127.0.0.1:31010";
 const DREMIO_LEGACY_JDBC_DRIVER_CLASS = "com.dremio.jdbc.Driver";
 const DEFAULT_SSH_USER = "root";
+const DIRECT_SIDEBAR_OBJECT_TYPES = new Set<DatabaseType>(["redis", "etcd", "zookeeper", "consul", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "milvus", "qdrant", "weaviate", "chromadb", "mq", "mqtt", "nacos", "plugin"]);
 const ETCD_GRPC_MAX_INBOUND_DEFAULT_MIB = 32;
 const ETCD_GRPC_MAX_INBOUND_MIN_MIB = 1;
 const ETCD_GRPC_MAX_INBOUND_MAX_MIB = 256;
@@ -439,6 +443,7 @@ const defaultForm = (): ConnectionForm => ({
   docs_notes_path: undefined,
   read_only: false,
   show_system_schemas: false,
+  sidebar_auto_load_all_tables: false,
   is_production: false,
   production_databases: [],
   visible_databases: undefined,
@@ -630,6 +635,7 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+const supportsAutomaticTableLoading = computed(() => supportsDataDictionary(form.value.db_type) && !DIRECT_SIDEBAR_OBJECT_TYPES.has(form.value.db_type));
 const redisKeyTemplatesText = ref("");
 const noteTextareaRef = ref<HTMLTextAreaElement | null>(null);
 const showGaussdbConnectionMode = computed(() => form.value.db_type === "gaussdb");
@@ -1178,6 +1184,8 @@ const driverProfiles: Record<string, ConnectionProfileDefinition> = {
   ...CONNECTION_PROFILES,
   ...jdbcProductDriverProfiles(),
 };
+const nebulaDriverProfiles = databaseManifestEntry("nebula")?.driverProfiles ?? [];
+const nebulaDefaultDriverProfile = nebulaDriverProfiles[0]?.profile ?? "nebula";
 
 function profileForConfig(config: ConnectionConfig) {
   if (config.db_type === "plugin" && config.plugin_id && config.plugin_connection_provider) {
@@ -2798,7 +2806,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
   const previousDatabaseType = form.value.db_type;
   selectedType.value = val;
   form.value.db_type = profile.type;
-  form.value.driver_profile = val;
+  form.value.driver_profile = val === "nebula" ? nebulaDefaultDriverProfile : val;
   form.value.driver_label = isCustomCompatibleProfile() ? customDriverName.value.trim() || profile.label : profile.label;
   const preserveMeilisearchConfig = preserveConnectionFields && previousDatabaseType === "meilisearch" && profile.type === "meilisearch";
   if (profile.type !== "sqlserver" && !preserveMeilisearchConfig) {
@@ -2880,6 +2888,9 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       jdbcDriverPathsInput.value = "";
       jdbcManualClasspathOpen.value = true;
     }
+    if (profile.type === "transwarp") {
+      form.value.connection_string = undefined;
+    }
     if (profile.type === "spanner") {
       // Google Cloud endpoints carry no host; the local emulator is opted into
       // by typing host `localhost` and port 9010 explicitly.
@@ -2935,7 +2946,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     if (profile.type === "salesforce") {
       resetSalesforceOAuthFields(form.value.external_config, form.value.password);
     }
-    resetHiveKerberosFields(profile.type === "hive" || profile.type === "argo" || profile.type === "kyuubi" || profile.type === "impala" ? form.value : undefined);
+    resetHiveKerberosFields(profile.type === "hive" || profile.type === "argo" || profile.type === "transwarp" || profile.type === "kyuubi" || profile.type === "impala" ? form.value : undefined);
   }
   if (profile.type === "meilisearch") {
     syncMeilisearchHostInput(form.value);
@@ -3066,7 +3077,7 @@ watch(
         db_type: oceanbasePatch?.db_type || profileConfig?.type || config.db_type,
         driver_profile: config.db_type === "plugin" ? "plugin" : oceanbasePatch?.driver_profile || config.driver_profile || profile,
         driver_label: config.driver_label || oceanbasePatch?.driver_label || driverProfiles[profile]?.label || config.db_type,
-        url_params: config.url_params || "",
+        ...savedMysqlTlsFormFields(config),
         agent_java_options: config.agent_java_options || [],
         host: config.db_type === "h2" && h2FilePathFromJdbcUrl(config.connection_string) ? h2FilePathFromJdbcUrl(config.connection_string) : config.host,
         port: profile === "tdengine" && (config.port === 0 || config.port === 6030) ? 6041 : config.port,
@@ -3083,10 +3094,6 @@ watch(
         query_timeout_inherit: config.query_timeout_inherit === true,
         idle_timeout_secs: config.idle_timeout_secs ?? 60,
         keepalive_interval_secs: config.keepalive_interval_secs ?? 30,
-        ssl: config.ssl || false,
-        ca_cert_path: config.ca_cert_path || "",
-        client_cert_path: config.client_cert_path || "",
-        client_key_path: config.client_key_path || "",
         sysdba: config.sysdba || isOracleSysUser(config),
         oracle_connection_type: config.oracle_connection_type || "service_name",
         connection_string: config.connection_string,
@@ -3112,6 +3119,7 @@ watch(
         docs_notes_path: config.docs_notes_path,
         read_only: config.read_only || false,
         show_system_schemas: config.show_system_schemas || false,
+        sidebar_auto_load_all_tables: config.sidebar_auto_load_all_tables === true,
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
         visible_databases: config.visible_databases,
@@ -3172,7 +3180,7 @@ watch(
         resetSalesforceOAuthFields(undefined, undefined);
       }
       resetElasticsearchProxyFields(config.db_type === "elasticsearch" ? config.external_config : undefined);
-      resetHiveKerberosFields(config.db_type === "hive" || config.db_type === "argo" || config.db_type === "kyuubi" || config.db_type === "impala" ? config : undefined);
+      resetHiveKerberosFields(config.db_type === "hive" || config.db_type === "argo" || config.db_type === "transwarp" || config.db_type === "kyuubi" || config.db_type === "impala" ? config : undefined);
       resetDamengJvmOptions(config.db_type === "dameng" ? config : undefined);
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
@@ -3304,8 +3312,8 @@ const selectedHttpTunnelLayer = computed(() => (selectedTransportLayer.value?.ty
 
 const tunnelProfiles = computed(() => {
   const profiles = tunnelProfileStore.profiles;
-  if (!sqliteSshOnlyTransport.value) return profiles;
-  return profiles.filter((profile) => profile.type === "ssh");
+  if (!sqliteRemoteTransportRestricted.value) return profiles;
+  return profiles.filter((profile) => isSqliteRemoteTransportLayerType(profile.type));
 });
 const selectedLayerProfileId = computed(() => selectedTransportLayer.value?.profile_id || "");
 const selectedLayerProfile = computed(() => tunnelProfileStore.profileById(selectedLayerProfileId.value));
@@ -3424,6 +3432,12 @@ function switchH2ConnectionMode(mode: H2ConnectionMode) {
 }
 
 function switchEtcdApiVersion(profile: "etcd" | "etcd-v2") {
+  form.value.driver_profile = profile;
+  resetTestState();
+}
+
+function switchNebulaDriverProfile(profile: unknown) {
+  if (typeof profile !== "string" || !nebulaDriverProfiles.some((entry) => entry.profile === profile)) return;
   form.value.driver_profile = profile;
   resetTestState();
 }
@@ -3644,14 +3658,15 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
   "influxdb",
   "victoriametrics",
   "cassandra",
+  "nebula",
   "zookeeper",
 ]);
-const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
+const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type) || supportsMysqlTlsTab(form.value.db_type, selectedType.value));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse" || form.value.db_type === "victoriametrics");
-const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase");
+const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase" && form.value.db_type !== "nebula");
 const showGenericUrlParamsHint = computed(() => form.value.db_type === "mysql" || form.value.db_type === "doris" || form.value.db_type === "starrocks");
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
-const supportsMysqlTlsOptions = computed(() => form.value.db_type === "starrocks" || (form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value)));
+const supportsMysqlTlsOptions = computed(() => mysqlTlsOptionsSupported(form.value.db_type, selectedType.value));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
 const supportsDoltSystemTables = computed(() => isDoltDriverProfile(form.value.driver_profile));
 const showDoltSystemTables = computed({
@@ -3795,7 +3810,7 @@ const canUseTransportLayers = computed(() => {
   }
   return true;
 });
-const sqliteSshOnlyTransport = computed(() => form.value.db_type === "sqlite");
+const sqliteRemoteTransportRestricted = computed(() => form.value.db_type === "sqlite");
 const sqliteUsesSsh = computed(() => form.value.db_type === "sqlite" && connectionUsesSsh(form.value));
 const sqliteWorkerPlacement = computed({
   get: () => getUrlParam(form.value.url_params, "dbx_sqlite_worker") || "session",
@@ -4622,6 +4637,9 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   } else {
     config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
   }
+  if (config.db_type === "nebula" && (!config.driver_profile || config.driver_profile === "nebula")) {
+    config.driver_profile = nebulaDefaultDriverProfile;
+  }
   config.database_info = undefined;
   config.database = normalizeStoredConnectionDatabase(config.db_type, config.database);
   config.note = config.note?.trim() || undefined;
@@ -4694,7 +4712,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.ssl = !!config.ssl || damengSsl.enabled;
     config.url_params = applyDamengSslUrlParams(config.url_params, config.ssl, damengSsl.sslFilesPath, damengSsl.sslKeystorePassword, damengSsl.sslProtocol);
   }
-  if (config.db_type === "hive" || config.db_type === "argo" || config.db_type === "kyuubi" || config.db_type === "impala") {
+  if (config.db_type === "hive" || config.db_type === "argo" || config.db_type === "transwarp" || config.db_type === "kyuubi" || config.db_type === "impala") {
     if (hiveAuthMode.value === "kerberos" && !hivePrincipal.value.trim()) {
       throw new Error(t("connection.hiveKerberosPrincipalRequired"));
     }
@@ -5027,6 +5045,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.db_type !== "etcd" &&
     config.db_type !== "consul" &&
     config.db_type !== "starrocks" &&
+    config.db_type !== "doris" &&
     config.db_type !== "mongodb" &&
     config.db_type !== "victoriametrics" &&
     config.db_type !== "zookeeper" &&
@@ -5090,6 +5109,10 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.jdbc_driver_class = undefined;
     config.jdbc_driver_paths = [];
   }
+  if (config.db_type === "transwarp") {
+    config.jdbc_driver_class = undefined;
+    config.jdbc_driver_paths = [];
+  }
   if (config.db_type === "h2") {
     if (config.driver_profile === "h2-custom") {
       config.jdbc_driver_class = config.jdbc_driver_class?.trim() || "org.h2.Driver";
@@ -5142,6 +5165,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.visible_databases = Array.isArray(config.visible_databases) && config.visible_databases.length > 0 ? config.visible_databases : undefined;
   }
   if (!config.show_system_schemas) config.show_system_schemas = undefined;
+  if (!config.sidebar_auto_load_all_tables) config.sidebar_auto_load_all_tables = undefined;
   if (config.visible_schemas && Object.keys(config.visible_schemas).length === 0) config.visible_schemas = undefined;
   if (config.agent_java_options && config.agent_java_options.length === 0) config.agent_java_options = undefined;
   // Pasted credentials may carry invisible characters that trim() keeps (#9043).
@@ -5776,7 +5800,20 @@ function saveVisibleDatabaseSelection() {
       [key]: normalizeVisibleSchemaSelection([...visibleDatabaseSelection.value], visibleDatabaseNames.value),
     };
   } else {
-    form.value.visible_databases = normalizeVisibleDatabaseSelection([...visibleDatabaseSelection.value], visibleDatabaseNames.value);
+    // "全选"等价于不筛选：存成当时的库名快照会让之后新建的库永远看不到。
+    const action = resolveVisibleDatabaseSaveAction({
+      selection: visibleDatabaseSelection.value,
+      allNames: visibleDatabaseNames.value,
+      defaultVisibleNames: defaultListedVisibleDatabaseNames.value,
+      configured: form.value.visible_databases,
+      configuredPatterns: form.value.visible_database_patterns,
+      patterns: form.value.visible_database_patterns ?? [],
+    });
+    if (action.type === "clear") {
+      form.value.visible_databases = undefined;
+    } else if (action.type === "set") {
+      form.value.visible_databases = action.databaseNames;
+    }
   }
   showVisibleDatabasesDialog.value = false;
 }
@@ -6151,10 +6188,10 @@ watch(canUseTransportLayers, (value) => {
   }
 });
 
-watch(sqliteSshOnlyTransport, (sshOnly) => {
-  if (!sshOnly) return;
+watch(sqliteRemoteTransportRestricted, (restricted) => {
+  if (!restricted) return;
   const layers = form.value.transport_layers || [];
-  const next = layers.filter((layer) => layer.type === "ssh");
+  const next = layers.filter((layer) => isSqliteRemoteTransportLayerType(layer.type));
   if (next.length === layers.length) return;
   form.value.transport_layers = next;
   selectedTransportLayerId.value = next[0]?.id || null;
@@ -6181,16 +6218,15 @@ function addSshTunnel() {
 }
 
 function addProxyTunnel() {
-  if (sqliteSshOnlyTransport.value) return;
   const next: TransportLayerConfig = { type: "proxy", ...defaultProxyTunnel() };
   next.name = `Proxy ${transportLayers.value.length + 1}`;
-  form.value.transport_layers = [...transportLayers.value, next];
+  form.value.transport_layers = sqliteRemoteTransportRestricted.value ? insertSqliteRemoteTransportLayer(transportLayers.value, next) : [...transportLayers.value, next];
   selectedTransportLayerId.value = next.id;
   resetTestState();
 }
 
 function addHttpTunnel() {
-  if (sqliteSshOnlyTransport.value) return;
+  if (sqliteRemoteTransportRestricted.value) return;
   const next: TransportLayerConfig = { type: "http_tunnel", ...defaultHttpTunnel() };
   next.name = t("connection.httpTunnelDefaultName", { index: 1 });
   form.value.transport_layers = [next, ...transportLayers.value];
@@ -6199,9 +6235,9 @@ function addHttpTunnel() {
 }
 
 function duplicateTransportLayer(layer: TransportLayerConfig) {
-  if (sqliteSshOnlyTransport.value && layer.type !== "ssh") return;
+  if (sqliteRemoteTransportRestricted.value && !isSqliteRemoteTransportLayerType(layer.type)) return;
   const next = normalizeTransportLayer({ ...layer, id: uuid(), name: layer.name ? `${layer.name} copy` : "" });
-  form.value.transport_layers = [...transportLayers.value, next];
+  form.value.transport_layers = sqliteRemoteTransportRestricted.value ? insertSqliteRemoteTransportLayer(transportLayers.value, next) : [...transportLayers.value, next];
   selectedTransportLayerId.value = next.id;
   resetTestState();
 }
@@ -6239,7 +6275,7 @@ function dropTransportLayer(targetId: string) {
 function changeSelectedTransportLayerType(type: "ssh" | "proxy" | "http_tunnel") {
   const selected = selectedTransportLayer.value;
   if (!selected || selected.type === type) return;
-  if (sqliteSshOnlyTransport.value && type !== "ssh") return;
+  if (sqliteRemoteTransportRestricted.value && !isSqliteRemoteTransportLayerType(type)) return;
   const replacement: TransportLayerConfig =
     type === "proxy" ? { type: "proxy", ...defaultProxyTunnel(), id: selected.id, name: selected.name } : type === "http_tunnel" ? { type: "http_tunnel", ...defaultHttpTunnel(), id: selected.id, name: selected.name } : { type: "ssh", ...defaultSshTunnel(), id: selected.id, name: selected.name };
   form.value.transport_layers = transportLayers.value.map((layer) => (layer.id === selected.id ? replacement : layer));
@@ -6262,7 +6298,7 @@ function updateSelectedSshAuthMethod(value: unknown) {
 
 function validateTransportLayers(config: LegacyConnectionConfig) {
   const layers = config.transport_layers || [];
-  if (config.db_type === "sqlite" && layers.some((layer) => layer.enabled !== false && layer.type !== "ssh")) {
+  if (config.db_type === "sqlite" && sqliteRemoteTransportError(layers)) {
     throw new Error(t("connection.sqliteTransportSshOnly"));
   }
   layers.forEach((layer, index) => {
@@ -6822,7 +6858,16 @@ function openExternalUrl(url: string) {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent :style="dialogContentStyle" class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @escape-key-down="handleDialogEscape" @keydown="preventDialogDocumentSelectAll">
+    <DialogContent
+      :style="dialogContentStyle"
+      class="connection-dialog-content"
+      :class="connectionDialogContentClass"
+      :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined"
+      @interact-outside.prevent
+      @escape-key-down="handleDialogEscape"
+      @keydown="preventDialogDocumentSelectAll"
+      @copy="copyDialogPasswordFieldValue"
+    >
       <DialogHeader class="cursor-move select-none" @pointerdown="onDialogHeaderPointerDown" @pointermove="onDialogHeaderPointerMove" @pointerup="onDialogHeaderPointerEnd" @pointercancel="onDialogHeaderPointerEnd">
         <DialogTitle>{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
       </DialogHeader>
@@ -6996,6 +7041,20 @@ function openExternalUrl(url: string) {
                     <span class="min-w-0 flex-1 truncate text-sm text-left">{{ selectedProfile().label }}</span>
                     <Pencil class="h-3 w-3 text-muted-foreground" />
                   </button>
+                </div>
+
+                <div v-if="form.db_type === 'nebula'" class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelClass">{{ t("connection.version") }}</Label>
+                  <div class="col-span-3">
+                    <Select :model-value="form.driver_profile === 'nebula' ? nebulaDefaultDriverProfile : form.driver_profile" @update:model-value="switchNebulaDriverProfile">
+                      <SelectTrigger class="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="profile in nebulaDriverProfiles" :key="profile.profile" :value="profile.profile">{{ profile.label }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
 
                 <!-- OceanBase mode toggle -->
@@ -8877,7 +8936,7 @@ function openExternalUrl(url: string) {
                       <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.oracleTnsPathHint") }}</p>
                     </div>
 
-                    <template v-if="form.db_type === 'hive' || form.db_type === 'kyuubi' || form.db_type === 'impala'">
+                    <template v-if="form.db_type === 'hive' || form.db_type === 'transwarp' || form.db_type === 'kyuubi' || form.db_type === 'impala'">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.hiveAuthMode") }}</Label>
                         <div class="col-span-3 grid h-8 grid-cols-2 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">
@@ -9020,7 +9079,9 @@ function openExternalUrl(url: string) {
                                             ? 'catalog=paimon_catalog'
                                             : form.db_type === 'cassandra'
                                               ? 'localdatacenter=dc1'
-                                              : 'sslmode=prefer'
+                                              : form.db_type === 'transwarp'
+                                                ? 'fetchSize=500;auth=noSasl'
+                                                : 'sslmode=prefer'
                           "
                         />
                         <p v-if="showGenericUrlParamsHint" class="text-xs leading-5 text-muted-foreground">
@@ -9287,7 +9348,7 @@ function openExternalUrl(url: string) {
                   </label>
                 </div>
 
-                <template v-if="form.db_type === 'etcd' || form.db_type === 'consul' || form.db_type === 'zookeeper' || form.db_type === 'elasticsearch' || form.db_type === 'easysearch'">
+                <template v-if="form.db_type === 'etcd' || form.db_type === 'consul' || form.db_type === 'zookeeper' || form.db_type === 'elasticsearch' || form.db_type === 'easysearch' || form.db_type === 'nebula'">
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">
@@ -9340,7 +9401,7 @@ function openExternalUrl(url: string) {
                           <TooltipContent>{{ t("connection.etcdClientKeyBrowse") }}</TooltipContent>
                         </Tooltip>
                       </div>
-                      <p class="text-[11px] leading-4 text-muted-foreground">
+                      <p v-if="form.db_type !== 'nebula'" class="text-[11px] leading-4 text-muted-foreground">
                         {{ t("connection.etcdClientCertHint") }}
                       </p>
                     </div>
@@ -9880,6 +9941,16 @@ function openExternalUrl(url: string) {
                     <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
                   </label>
                 </div>
+                <div v-if="supportsAutomaticTableLoading" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.tableLoading") }}</Label>
+                  <div class="col-span-3 grid gap-1.5">
+                    <label class="flex cursor-pointer items-center gap-2">
+                      <Switch v-model="form.sidebar_auto_load_all_tables" />
+                      <span class="text-sm font-medium">{{ t("connection.autoLoadAllTables") }}</span>
+                    </label>
+                    <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.autoLoadAllTablesHint") }}</p>
+                  </div>
+                </div>
                 <!-- Documentation notes are a relational-only feature, so this
                      follows the same isSchemaAware gate as the row above. -->
                 <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-start gap-4">
@@ -9996,11 +10067,11 @@ function openExternalUrl(url: string) {
                         <Plus class="mr-1.5 h-3.5 w-3.5" />
                         {{ t("connection.sshHopAdd") }}
                       </Button>
-                      <Button v-if="!sqliteSshOnlyTransport" type="button" variant="outline" size="sm" @click="addProxyTunnel">
+                      <Button type="button" variant="outline" size="sm" @click="addProxyTunnel">
                         <Plus class="mr-1.5 h-3.5 w-3.5" />
                         {{ t("connection.proxy") }}
                       </Button>
-                      <Button v-if="!sqliteSshOnlyTransport" type="button" variant="outline" size="sm" @click="addHttpTunnel">
+                      <Button v-if="!sqliteRemoteTransportRestricted" type="button" variant="outline" size="sm" @click="addHttpTunnel">
                         <Plus class="mr-1.5 h-3.5 w-3.5" />
                         {{ t("connection.httpTunnelAdd") }}
                       </Button>
@@ -10049,7 +10120,7 @@ function openExternalUrl(url: string) {
                       <span v-else class="text-red-500">{{ t("connection.tunnelProfileMissing") }}</span>
                     </div>
                   </div>
-                  <div v-if="!selectedLayerProfileId && !sqliteSshOnlyTransport" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="!selectedLayerProfileId" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">Type</Label>
                     <Select :model-value="selectedTransportLayer.type" @update:model-value="(value: any) => changeSelectedTransportLayerType(value)">
                       <SelectTrigger class="col-span-3 h-9">
@@ -10058,7 +10129,7 @@ function openExternalUrl(url: string) {
                       <SelectContent>
                         <SelectItem value="ssh">SSH</SelectItem>
                         <SelectItem value="proxy">Proxy</SelectItem>
-                        <SelectItem value="http_tunnel">{{ t("connection.httpTunnel") }}</SelectItem>
+                        <SelectItem v-if="!sqliteRemoteTransportRestricted" value="http_tunnel">{{ t("connection.httpTunnel") }}</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>

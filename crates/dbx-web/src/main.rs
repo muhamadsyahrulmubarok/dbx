@@ -5,32 +5,37 @@ mod routes;
 mod sse;
 mod ssh_prompt;
 mod state;
+mod web_mcp;
 
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher};
 use axum::extract::DefaultBodyLimit;
+
+/// Login/setup payloads are one password field; 64 KiB is generous.
+const AUTH_BODY_LIMIT_BYTES: usize = 64 * 1024;
 use axum::http::{Request, StatusCode, Uri};
 use axum::middleware;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use dbx_core::connection::AppState;
 use dbx_core::persistence::secret_codec::SecretKeyPolicy;
 use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
 use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::Storage;
-use dbx_mcp::{streamable_http_router, DbxBackend, HttpAuth, LocalBackend};
+use dbx_mcp::{streamable_http_router, DbxBackend, LocalBackend};
 use state::WebState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
 use utoipa::OpenApi;
+use web_mcp::WebMcpRuntime;
 
 const XLSX_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
@@ -102,6 +107,17 @@ async fn migration_gate(
             })),
         )
             .into_response();
+    }
+    next.run(request).await
+}
+
+async fn web_mcp_demo_gate(
+    state: axum::extract::State<Arc<WebState>>,
+    request: Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    if state.demo_mode {
+        return StatusCode::FORBIDDEN.into_response();
     }
     next.run(request).await
 }
@@ -271,54 +287,16 @@ fn mount_static_assets(mut app: Router, public_base_path: &str, source: Option<S
     app
 }
 
-/// Builds the native Web MCP endpoint. It is intentionally opt-in: exposing a
-/// token-bearing MCP server on a Web listener must never happen merely because
-/// DBX Web itself was started.
-fn web_mcp_router(web_state: &Arc<WebState>) -> Result<Option<Router>, String> {
-    let token = web_mcp_token()?;
-    let Some(token) = token else {
-        return Ok(None);
-    };
-
-    let allowed_hosts = comma_separated_env("DBX_WEB_MCP_ALLOWED_HOSTS");
-    if allowed_hosts.is_empty() {
-        return Err("DBX_WEB_MCP_ALLOWED_HOSTS is required when DBX Web MCP is enabled".into());
-    }
-
-    let allowed_origins = comma_separated_env("DBX_WEB_MCP_ALLOWED_ORIGINS");
-    let auth = HttpAuth::new(token, allowed_origins, false)?;
+/// Builds the native Web MCP endpoint. The route remains mounted while the
+/// feature is disabled so an authenticated settings action can enable it
+/// without restarting the Web process; the shared auth middleware returns 404
+/// until a token is configured.
+fn web_mcp_router(web_state: &Arc<WebState>) -> Result<Router, String> {
+    let auth = web_state.web_mcp.auth();
     let backend: Arc<dyn DbxBackend> =
         Arc::new(LocalBackend::from_app_state(web_state.app.clone(), web_state.data_dir.clone()));
 
-    Ok(Some(streamable_http_router(backend, "/mcp", auth, allowed_hosts, true)))
-}
-
-fn web_mcp_token() -> Result<Option<String>, String> {
-    let inline_token = std::env::var("DBX_WEB_MCP_TOKEN").ok();
-    let token_file = std::env::var("DBX_WEB_MCP_TOKEN_FILE").ok();
-    match (inline_token, token_file) {
-        (Some(_), Some(_)) => Err("set only one of DBX_WEB_MCP_TOKEN or DBX_WEB_MCP_TOKEN_FILE".into()),
-        (Some(token), None) if !token.trim().is_empty() => Ok(Some(token)),
-        (Some(_), None) => Err("DBX_WEB_MCP_TOKEN must not be empty".into()),
-        (None, Some(path)) => std::fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read DBX_WEB_MCP_TOKEN_FILE: {error}"))
-            .map(|token| token.trim_end_matches(['\r', '\n']).to_owned())
-            .and_then(|token| {
-                (!token.is_empty()).then_some(token).ok_or_else(|| "DBX_WEB_MCP_TOKEN_FILE is empty".into())
-            })
-            .map(Some),
-        (None, None) => Ok(None),
-    }
-}
-
-fn comma_separated_env(name: &str) -> Vec<String> {
-    std::env::var(name)
-        .ok()
-        .into_iter()
-        .flat_map(|value| {
-            value.split(',').map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>()
-        })
-        .collect()
+    streamable_http_router(backend, "/mcp", auth, web_state.web_mcp.allowed_hosts(), true)
 }
 
 #[cfg(feature = "mq-admin")]
@@ -335,6 +313,7 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
         .route("/mq/namespaces/delete", post(routes::mq::delete_namespace))
         .route("/mq/namespaces/policies", post(routes::mq::get_namespace_policies))
         .route("/mq/topics/list", post(routes::mq::list_topics))
+        .route("/mq/topics/list-page", post(routes::mq::list_topics_page))
         .route("/mq/topics/create", post(routes::mq::create_topic))
         .route("/mq/topics/delete", post(routes::mq::delete_topic))
         .route("/mq/topics/update-partitions", post(routes::mq::update_partitions))
@@ -344,6 +323,7 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
         .route("/mq/topics/alter-config", post(routes::mq::alter_topic_config))
         .route("/mq/topics/skip-accumulation", post(routes::mq::skip_topic_accumulation))
         .route("/mq/exchanges/list", post(routes::mq::list_exchanges))
+        .route("/mq/exchanges/list-page", post(routes::mq::list_exchanges_page))
         .route("/mq/exchanges/create", post(routes::mq::create_exchange))
         .route("/mq/exchanges/delete", post(routes::mq::delete_exchange))
         .route("/mq/bindings/list", post(routes::mq::list_bindings))
@@ -481,6 +461,13 @@ async fn serve() {
     let demo_mode = demo::demo_mode_from_env();
 
     let migration_ready = storage_migration_ready(&app_state).await;
+    let web_mcp = Arc::new(if migration_ready {
+        WebMcpRuntime::load(&app_state.storage, !password_disabled && password_hash.is_some())
+            .await
+            .expect("Invalid DBX Web MCP configuration")
+    } else {
+        WebMcpRuntime::disabled()
+    });
     let web_state = Arc::new(WebState {
         app: app_state,
         data_dir,
@@ -499,6 +486,7 @@ async fn serve() {
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
         migration_ready: Arc::new(AtomicBool::new(migration_ready)),
+        web_mcp,
     });
 
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
@@ -522,10 +510,13 @@ async fn serve() {
         .route("/database-backups/{id}/files/{index}", get(routes::scheduled_backup::download))
         .route("/database-backups/{id}/files/{index}/restore", post(routes::scheduled_backup::prepare_restore))
         // Auth
-        .route("/auth/login", post(auth::login))
+        // Auth payloads are tiny password strings: cap them far below the
+        // global limit so the extractor cannot buffer an unauthenticated DoS
+        // body before any rate limiting runs.
+        .route("/auth/login", post(auth::login).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
         .route("/auth/check", get(auth::check))
-        .route("/auth/setup", post(auth::setup))
-        .route("/auth/change-password", post(auth::change_password))
+        .route("/auth/setup", post(auth::setup).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
+        .route("/auth/change-password", post(auth::change_password).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
         .route("/auth/logout", post(auth::logout))
         // Connection
         .route("/connection/test", post(routes::connection::test_connection))
@@ -868,6 +859,7 @@ async fn serve() {
         .route("/redis/set-keys-ttl", post(routes::redis::set_keys_ttl))
         .route("/redis/set-keys-expire-at", post(routes::redis::set_keys_expire_at))
         .route("/redis/delete-keys", post(routes::redis::delete_keys))
+        .route("/redis/delete-keys-by-pattern", post(routes::redis::delete_keys_by_pattern))
         .route("/redis/flush-db", post(routes::redis::flush_db))
         .route("/redis/execute-command", post(routes::redis::execute_command))
         .route("/redis/pubsub/publish", post(routes::redis::publish_message))
@@ -1309,6 +1301,8 @@ async fn serve() {
             get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
         )
         .route("/app-settings/mcp-http-status", get(routes::app_settings::load_web_mcp_http_status))
+        .route("/app-settings/mcp-http", put(routes::app_settings::save_web_mcp_http_settings))
+        .route("/app-settings/mcp-http/rotate-token", post(routes::app_settings::rotate_web_mcp_token))
         .route(
             "/app-settings/max-agent-turns",
             get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
@@ -1318,6 +1312,12 @@ async fn serve() {
             get(routes::app_settings::load_history_retention_limit)
                 .put(routes::app_settings::save_history_retention_limit),
         )
+        .route(
+            "/app-settings/mcp-history-retention-limit",
+            get(routes::app_settings::load_mcp_history_retention_limit)
+                .put(routes::app_settings::save_mcp_history_retention_limit),
+        )
+        .route("/app-settings/mcp-history-retention-cleanup", post(routes::app_settings::cleanup_mcp_history_retention))
         .route(
             "/app-settings/max-retries",
             get(routes::app_settings::load_max_retries).put(routes::app_settings::save_max_retries),
@@ -1343,6 +1343,8 @@ async fn serve() {
             post(routes::cloud_sync::forget_webdav_sync_secrets_passphrase),
         )
         .route("/cloud-sync/webdav/upload", post(routes::cloud_sync::webdav_sync_upload))
+        .route("/cloud-sync/catalog/local", post(routes::cloud_sync::cloud_sync_local_catalog))
+        .route("/cloud-sync/webdav/inspect", post(routes::cloud_sync::webdav_sync_inspect))
         .route("/cloud-sync/webdav/download", post(routes::cloud_sync::webdav_sync_download))
         .route("/cloud-sync/snippet/test", post(routes::cloud_sync::snippet_sync_test))
         .route("/cloud-sync/snippet/token-status", post(routes::cloud_sync::snippet_token_status))
@@ -1352,6 +1354,7 @@ async fn serve() {
         .route("/cloud-sync/snippet/save-id", post(routes::cloud_sync::save_snippet_sync_id))
         .route("/cloud-sync/snippet/retry-legacy-cleanup", post(routes::cloud_sync::retry_snippet_legacy_cleanup))
         .route("/cloud-sync/snippet/upload", post(routes::cloud_sync::snippet_sync_upload))
+        .route("/cloud-sync/snippet/inspect", post(routes::cloud_sync::snippet_sync_inspect))
         .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
 
     // Do not expose DuckDB-only handlers from builds that omit DuckDB sidecar support.
@@ -1372,10 +1375,13 @@ async fn serve() {
         .layer(CompressionLayer::new().compress_when(web_compression_predicate()))
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
-    if let Some(mcp_router) = web_mcp_router(&web_state).expect("Invalid DBX Web MCP configuration") {
-        app = app.merge(mcp_router.layer(middleware::from_fn_with_state(web_state.clone(), migration_gate)));
-        tracing::info!("DBX Web MCP is enabled at /mcp");
-    }
+    let mcp_router = web_mcp_router(&web_state).expect("Invalid DBX Web MCP configuration");
+    app = app.merge(
+        mcp_router
+            .layer(middleware::from_fn_with_state(web_state.clone(), web_mcp_demo_gate))
+            .layer(middleware::from_fn_with_state(web_state.clone(), migration_gate)),
+    );
+    tracing::info!("DBX Web MCP endpoint is available at /mcp when enabled");
 
     let static_dir = std::env::var_os("DBX_STATIC_DIR").map(std::path::PathBuf::from);
     // DBX_STATIC_DIR always wins (frontend development); otherwise serve the
@@ -1398,7 +1404,19 @@ async fn serve() {
 
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // Defaults to all interfaces for container deployments; operators who
+    // expose the service through a local reverse proxy can pin the listener
+    // (DBX_BIND_ADDR=127.0.0.1) without a firewall change. The value is an
+    // IP only — the port always comes from DBX_PORT so the HTTP listener and
+    // the Redis PubSub server (which reads DBX_PORT independently) stay in
+    // sync.
+    let ip = match std::env::var("DBX_BIND_ADDR").ok().as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => {
+            value.parse::<IpAddr>().unwrap_or_else(|error| panic!("invalid DBX_BIND_ADDR \"{value}\": {error}"))
+        }
+        None => IpAddr::from([0, 0, 0, 0]),
+    };
+    let addr = SocketAddr::new(ip, port);
 
     tracing::info!("DBX Web server starting on http://{}", addr);
     if public_base_path != "/" {

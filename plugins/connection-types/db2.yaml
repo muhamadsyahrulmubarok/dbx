@@ -25,7 +25,7 @@ capabilities:
   diagram: true
   tableDataEdit: true
   tableStructureEdit: false
-  tableImport: false
+  tableImport: true
   dataTransfer: false
   sqlFileExecution: true
   databaseCreate: false

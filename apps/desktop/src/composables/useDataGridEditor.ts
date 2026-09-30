@@ -6,6 +6,7 @@ import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
 import { focusDataGridEditorWithoutScrolling, preserveDataGridScrollPosition } from "@/lib/dataGrid/dataGridEditorFocus";
 import { normalizeDataGridSaveError } from "@/lib/dataGrid/dataGridSql";
+import { isOpaqueAggregateStateColumnType } from "@/lib/dataGrid/binaryCellDownload";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
 import type { GridNewRowMeta, GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
 import { supportsDataGridTransaction } from "@/lib/table/tableEditing";
@@ -50,7 +51,7 @@ interface ConditionalUpdateExecution {
   outcome: ConditionalUpdateOutcome;
 }
 
-export type DataGridAppendPastedRowsResult = { ok: true; rowCount: number } | { ok: false; reason: "not-editable" | "invalid-target" | "target-not-empty" | "empty-paste" | "readonly-column" };
+export type DataGridAppendPastedRowsResult = { ok: true; rowCount: number } | { ok: false; reason: "not-editable" | "invalid-target" | "target-not-empty" | "empty-paste" | "readonly-column" | "no-matching-columns" };
 
 type CommitEditResult =
   | {
@@ -80,18 +81,21 @@ export interface CustomSaveHandler {
   save: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; newRowMeta: GridNewRowMeta[]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<void>;
   applySavedChanges?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; columns: string[] }) => void;
   preview?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; newRowMeta: GridNewRowMeta[]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<string[]>;
+  /** Optional per-existing-row safety gate used before a deletion can be staged. */
+  canDeleteRow?: (sourceIndex: number, row: readonly CellValue[]) => boolean;
+  /** Selects an unconditional, statement-previewing confirmation before save. */
+  confirmation?: "influxdb-v1-delete";
+  /** Refresh after an execution error when a non-transactional batch may have partially succeeded. */
+  reloadOnFailure?: boolean;
   canInsert?: boolean;
+  canUpdate?: boolean;
   canDelete?: boolean;
   readonlyColumns?: string[];
   supportsInsert?: boolean;
   targetLabel?: string;
 }
 
-/**
- * Summary handed to `confirmSaveRequest` so an engine whose writes cannot be
- * rolled back (Salesforce REST: one record per request, no transactions) can
- * show the operator exactly what is about to happen before anything is sent.
- */
+/** Summary handed to `confirmSaveRequest` for a final mutation review. */
 export interface DataGridSaveConfirmationRequest {
   /** Rows with edited cells (one write per row). */
   updates: number;
@@ -99,12 +103,12 @@ export interface DataGridSaveConfirmationRequest {
   deletes: number;
   /** Save target name (table / sObject), when known. */
   targetLabel?: string;
-  /** The statements about to be executed — for Salesforce these are `DBX SALESFORCE DML` pseudo-commands. */
+  /** The SQL or pseudo-statements about to be executed. */
   statements: string[];
 }
 
 export interface UseDataGridEditorOptions {
-  result: ComputedRef<{ columns: string[]; rows: CellValue[][] }>;
+  result: ComputedRef<{ columns: string[]; rows: CellValue[][]; column_types?: string[] }>;
   editable: ComputedRef<boolean | undefined>;
   databaseType: ComputedRef<DatabaseType | undefined>;
   connectionId: ComputedRef<string | undefined>;
@@ -135,11 +139,7 @@ export interface UseDataGridEditorOptions {
   rowStatusFilter: Ref<RowStatusFilter>;
   dataGridQuickEntryEnabled?: ComputedRef<boolean>;
   confirmDangerousRowDeletion?: ComputedRef<boolean>;
-  /**
-   * Optional operator review before a save is executed. Return `false` to cancel:
-   * the pending edits stay in the grid and nothing is sent. Engines whose writes
-   * cannot be rolled back (Salesforce REST) use this; auto-save never bypasses it.
-   */
+  /** Optional operator review before a save is executed. Auto-save never bypasses it. */
   confirmSaveRequest?: ComputedRef<((request: DataGridSaveConfirmationRequest) => Promise<boolean>) | undefined>;
   /** `生成 SQL 时包含数据库名` — qualify saved tables with their database. */
   includeDatabaseNameInSaveSql?: ComputedRef<boolean>;
@@ -1240,7 +1240,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return row.every((value) => value === null || (typeof value === "string" && value.trim() === ""));
   }
 
-  function appendPastedRowsToNewRow(targetRowId: number, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[]): DataGridAppendPastedRowsResult {
+  function appendPastedRowsToNewRow(targetRowId: number, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): DataGridAppendPastedRowsResult {
     if (!editable.value) return { ok: false, reason: "not-editable" };
     if (pastedRows.every((row) => row.every((value) => value === ""))) {
       return { ok: false, reason: "empty-paste" };
@@ -1260,8 +1260,26 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const pastedColumnCount = Math.max(...pastedRows.map((row) => row.length));
     if (pastedColumnCount <= 0) return { ok: false, reason: "empty-paste" };
 
-    const targetColumns = columnIndexes.slice(0, pastedColumnCount);
-    if (targetColumns.some((columnIndex) => !canEditColumn(columnIndex))) return { ok: false, reason: "readonly-column" };
+    // With explicit column names (SQL INSERT), align pasted values by column
+    // name instead of visible position. Unknown names are ignored together
+    // with their values; if none of the pasted names matches this result's
+    // columns, reject the paste.
+    const valueTargets: Array<{ columnIndex: number; valueIndex: number }> = [];
+    if (columnNames?.length) {
+      const nameToColumnIndex = new Map<string, number>();
+      columnIndexes.forEach((columnIndex) => {
+        const name = sourceColumns.value?.[columnIndex] ?? result.value.columns[columnIndex];
+        if (name !== undefined && !nameToColumnIndex.has(name.toLowerCase())) nameToColumnIndex.set(name.toLowerCase(), columnIndex);
+      });
+      columnNames.forEach((name, valueIndex) => {
+        const columnIndex = nameToColumnIndex.get(name.toLowerCase());
+        if (columnIndex !== undefined) valueTargets.push({ columnIndex, valueIndex });
+      });
+      if (valueTargets.length === 0) return { ok: false, reason: "no-matching-columns" };
+    } else {
+      columnIndexes.slice(0, pastedColumnCount).forEach((columnIndex, valueIndex) => valueTargets.push({ columnIndex, valueIndex }));
+    }
+    if (valueTargets.some(({ columnIndex }) => !canEditColumn(columnIndex))) return { ok: false, reason: "readonly-column" };
 
     const nextRows = newRows.value.map((row) => [...row]);
     const nextMeta = cloneNewRowMeta(newRowMeta.value);
@@ -1275,14 +1293,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const shouldClearColumn = clonedColumnClearPredicate();
     const mappedRows = pastedRows.map((pastedRow, rowIndex) => {
       const nextRow = rowIndex < reusableNewRowCount ? nextRows[targetNewIndex! + rowIndex]! : emptyDraftRow();
-      for (let columnOffset = 0; columnOffset < Math.min(pastedRow.length, targetColumns.length); columnOffset++) {
-        const columnIndex = targetColumns[columnOffset]!;
+      for (const { columnIndex, valueIndex } of valueTargets) {
+        if (valueIndex >= pastedRow.length) continue;
         // Pasting a copied row into a new row must not reuse its generated key.
         if (shouldClearColumn(columnIndex)) {
           nextRow[columnIndex] = null;
           continue;
         }
-        const value = pastedRow[columnOffset];
+        const value = pastedRow[valueIndex];
         nextRow[columnIndex] = value === null ? null : coerceCellValue(value, nextRow[columnIndex], columnIndex);
       }
       return nextRow;
@@ -1332,7 +1350,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return (columnIndex: number) => {
       const columnName = sourceColumns.value?.[columnIndex] ?? result.value.columns[columnIndex];
       if (columnName === undefined) return false;
-      return shouldClearClonedColumn(columnName, columnInfoByName.get(columnName.toLowerCase()));
+      const columnInfo = columnInfoByName.get(columnName.toLowerCase());
+      const resultType = result.value.column_types?.[columnIndex]?.trim();
+      if (isOpaqueAggregateStateColumnType(resultType || columnInfo?.data_type)) return true;
+      return shouldClearClonedColumn(columnName, columnInfo);
     };
   }
 
@@ -1589,6 +1610,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!tableMeta.value) return null;
     return {
       databaseType: resolvedDatabaseType.value,
+      serverVersion: connectionStore.getConfig(connectionId.value ?? "")?.database_info?.productVersion,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId.value),
       tableMeta: tableMeta.value,
       columns: result.value.columns,
@@ -1923,17 +1945,47 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const shouldReloadAfterSqlSave = shouldReloadAfterSave || snapshot.dirtyRows.size > 0;
 
     if (customHandler) {
-      try {
-        await customHandler.save({
-          dirtyRows: snapshot.dirtyRows,
-          newRows: snapshot.newRows,
-          newRowMeta: snapshot.newRowMeta,
-          deletedRows: snapshot.deletedRows,
-          columns: result.value.columns,
-          rows: result.value.rows,
+      const customChanges = {
+        dirtyRows: snapshot.dirtyRows,
+        newRows: snapshot.newRows,
+        newRowMeta: snapshot.newRowMeta,
+        deletedRows: snapshot.deletedRows,
+        columns: result.value.columns,
+        rows: result.value.rows,
+      };
+      const confirmSaveRequest = options.confirmSaveRequest?.value;
+      if (confirmSaveRequest) {
+        if (saveOptions.autoSave) {
+          await finishInterruptedSaveChanges(snapshot);
+          return;
+        }
+        let statements: string[];
+        try {
+          if (!customHandler.preview) throw new Error("This data source cannot safely preview the pending changes.");
+          statements = await customHandler.preview(customChanges);
+          if (statements.length === 0) throw new Error("This data source did not produce a safe mutation preview.");
+        } catch (e: any) {
+          saveError.value = normalizeDataGridSaveError(databaseType.value, e);
+          await finishInterruptedSaveChanges(snapshot);
+          return;
+        }
+        const saveConfirmed = await confirmSaveRequest({
+          updates: snapshot.dirtyRows.size,
+          inserts: snapshot.newRows.length,
+          deletes: snapshot.deletedRows.size,
+          targetLabel: customHandler.targetLabel,
+          statements,
         });
+        if (!saveConfirmed) {
+          await finishInterruptedSaveChanges(snapshot);
+          return;
+        }
+      }
+      try {
+        await customHandler.save(customChanges);
       } catch (e: any) {
         saveError.value = normalizeDataGridSaveError(databaseType.value, e);
+        if (customHandler.reloadOnFailure && shouldReloadAfterSave) reloadCurrentData();
         await finishInterruptedSaveChanges(snapshot);
         return;
       }

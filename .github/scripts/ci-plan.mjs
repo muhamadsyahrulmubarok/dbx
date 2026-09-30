@@ -26,6 +26,12 @@ export function knownJavaDrivers(root, nativeDrivers) {
   }
 }
 
+export function cargoMetadata(root, execute = execFileSync) {
+  return JSON.parse(execute("cargo", ["+stable", "metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"], {
+    cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+  }));
+}
+
 export function planCi({ files, metadata, root, eventName = "pull_request", rustChanged = false, agentsChanged = false, javaDrivers }) {
   const unknownDiff = files === null;
   files ??= [];
@@ -42,7 +48,7 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
     if (owner) affected.add(owner[0]);
     else if (/^(?:crates|src-tauri)\//.test(file)) unknownRust = true;
     if (file.startsWith("plugins/connection-types/")) affected.add("dbx-types");
-    if (file.startsWith("plugins/dialects/")) affected.add("dbx-sql");
+    if (file.startsWith("plugins/dialects/")) affected.add("dbx-sql-dialect");
   }
   const knownGroups = new Set(Object.values(rustGroups).flat());
   const unknownMember = packages.some((pkg) => !knownGroups.has(pkg.name));
@@ -72,7 +78,7 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
     && !nativeDrivers.some((driver) => file.startsWith(`agents/drivers/${driver}/`))
     && !jdbcDrivers.some((driver) => file.startsWith(`agents/drivers/${driver}/`)))
     || files.some((file) => file.startsWith(".github/scripts/bump-agent-versions.") || file === ".github/workflows/agents-release.yml"
-      || file === "crates/dbx-drivers/assets/agent-protocol-v2.json");
+      || file === "crates/dbx-driver-agent/assets/agent-protocol-v2.json");
   const allAgents = sharedAgents || (agentsChanged && nativeChanges.size === 0 && !javaDriverChanges);
   if (allAgents) {
     for (const driver of nativeDrivers) nativeChanges.add(driver);
@@ -97,9 +103,7 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const root = process.cwd();
-  const metadata = JSON.parse(execFileSync("cargo", ["metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"], {
-    cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
-  }));
+  const metadata = cargoMetadata(root);
   const plan = planCi({
     files: changedPaths(process.env.BASE_SHA, root), metadata, root, eventName: process.env.GITHUB_EVENT_NAME,
     rustChanged: process.env.RUST_CHANGED === "true", agentsChanged: process.env.AGENTS_CHANGED === "true",

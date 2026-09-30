@@ -101,7 +101,8 @@ import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRe
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
-import { showSqlInsertModeDialog, type SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import { showSqlInsertModeDialog, type SqlInsertDialect, type SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
 import {
   defaultPasteTableMode,
@@ -117,7 +118,6 @@ import {
 } from "@/lib/table/tableClipboard";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
-import { forceCsvTextForTemporalColumns } from "@/lib/dataGrid/columnFormatter";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { treeNodePinIdentity, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
@@ -251,7 +251,7 @@ const eventEditorKey = computed(() =>
   }),
 );
 // Table info panel state
-const tableInfoTab = ref<TableInfoTab>("info");
+const tableInfoTab = ref<TableInfoTab>("ddl");
 const tableOverviewStats = ref<ObjectStatistics | null>(null);
 const tableOverviewComment = ref<string | null>(null);
 const tableOverviewLoading = ref(false);
@@ -309,14 +309,12 @@ const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(
 const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
 const isVictoriaMetrics = computed(() => effectiveDatabaseType.value === "victoriametrics");
 const isMongodb = computed(() => props.connection.db_type === "mongodb");
-// Victoria Metrics reports series instead of rows and has no byte size to show;
-// every other engine (MongoDB collections included, via `collStats`) fills both
-// the row and size columns.
-const supportsObjectSizeStats = computed(() => !isVictoriaMetrics.value);
+// Neither VictoriaMetrics series nor NebulaGraph tag/edge metadata has table byte-size stats.
+const supportsObjectSizeStats = computed(() => !isVictoriaMetrics.value && effectiveDatabaseType.value !== "nebula");
 // The batch table toolbar (export/copy/truncate/empty/drop selected) is SQL-only:
 // MongoDB collections are not dropped or truncated through it.
-const supportsBatchTableActions = computed(() => !isVictoriaMetrics.value && !isMongodb.value);
-const showTableStatistics = computed(() => objectFilter.value === "all" || objectFilter.value === "tables");
+const supportsBatchTableActions = computed(() => !isVictoriaMetrics.value && !isMongodb.value && effectiveDatabaseType.value !== "nebula");
+const showTableStatistics = computed(() => effectiveDatabaseType.value !== "nebula" && (objectFilter.value === "all" || objectFilter.value === "tables"));
 const showObjectRowStats = computed(() => showTableStatistics.value);
 const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
@@ -396,6 +394,10 @@ const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   comment: 260,
 });
 const objectBrowserRowsLoadGuard = createObjectBrowserRowsLoadGuard();
+// schema 列表的失效只跟随上下文（连接/库/schema 变化、卸载），不跟随对象列表加载：
+// loadObjects() 会推进 objectBrowserRowsLoadGuard 的 epoch，若两者共用一个 epoch，
+// 与对象列表并行发起的 loadSchemas 会被判定为过期而放弃写入 schema 列表 (#8665)。
+const schemaListLoadGuard = createObjectBrowserRowsLoadGuard();
 let stopColumnResize: (() => void) | null = null;
 let preserveObjectFilterScrollOnce = false;
 
@@ -612,7 +614,7 @@ watch(
   },
 );
 
-const showCheckboxColumn = computed(() => settingsStore.editorSettings.objectBrowserShowCheckbox || selectedTableCount.value > 0);
+const showCheckboxColumn = computed(() => supportsBatchTableActions.value && (settingsStore.editorSettings.objectBrowserShowCheckbox || selectedTableCount.value > 0));
 
 function toggleCheckboxColumn() {
   const next = !settingsStore.editorSettings.objectBrowserShowCheckbox;
@@ -1606,6 +1608,11 @@ async function loadSourcePanel(row: ObjectBrowserRow, options?: { preserveEditin
   sourceEditableText.value = "";
   sourceDraft.value = "";
   sourceSaveError.value = "";
+  // A new source context owns the save spinner: the previous save's finally()
+  // can no longer run once this load starts (the guard epoch moved on) — the
+  // success path itself closes the panel, which bumps the epoch — so without
+  // this reset the Save button would spin and stay disabled for good.
+  sourceSaving.value = false;
   sourceLoading.value = true;
   const connectionId = props.connection.id;
   const database = props.database;
@@ -1682,6 +1689,7 @@ async function openNewQuery(row: ObjectBrowserRow) {
     await buildTableSelectSql({
       databaseType: effectiveDatabaseType.value,
       driverProfile: props.connection.driver_profile,
+      serverVersion: props.connection.database_info?.productVersion,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       catalog: props.catalog,
       database: props.database,
@@ -2281,16 +2289,31 @@ function tableDdlObjectType(type: ObjectBrowserRow["type"]): ObjectSourceKind | 
 }
 
 async function exportDataLegacy(row: ObjectBrowserRow, format: "json") {
+  const { connection, database, catalog } = props;
+  const { id: connectionId, db_type: databaseType, query_timeout_secs: timeoutSecs } = connection;
+  const exportDatabaseType = effectiveDatabaseType.value;
   try {
     const schema = row.schema || selectedSchema.value;
-    const queryColumns = props.connection.db_type === "neo4j" ? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog)).map((column) => column.name) : undefined;
+    const queryColumns = databaseType === "neo4j" ? (await api.getColumns(connectionId, database, schema || database, row.name, catalog)).map((column) => column.name) : undefined;
+    const useAgentCursor = databaseType === "cassandra";
+    const clientSessionId = useAgentCursor ? `table-export:${generateDatabaseExportId()}` : undefined;
     const result = await fetchTableDataForExport({
-      databaseType: effectiveDatabaseType.value,
-      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
+      databaseType: exportDatabaseType,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
       schema,
       tableName: row.name,
       columns: queryColumns,
-      executePage: (sql) => api.executeQuery(props.connection.id, props.database, sql),
+      useAgentCursor,
+      executePage: (sql, cursorOptions) => (cursorOptions ? api.executeQuery(connectionId, database, sql, undefined, undefined, { ...cursorOptions, clientSessionId, catalog, timeoutSecs }) : api.executeQuery(connectionId, database, sql)),
+      closeCursor: useAgentCursor
+        ? async (sessionId) => {
+            try {
+              if (sessionId) await api.closeQuerySession(connectionId, database, sessionId, clientSessionId, catalog);
+            } finally {
+              await api.closeClientConnectionSession(connectionId, database, clientSessionId!, catalog);
+            }
+          }
+        : undefined,
     });
 
     if (format === "json") {
@@ -2312,14 +2335,14 @@ async function exportDataLegacy(row: ObjectBrowserRow, format: "json") {
   }
 }
 
-async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql") {
+async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql", insertDialect: SqlInsertDialect = "source") {
   if (format === "json") {
     await exportDataLegacy(row, format);
     return;
   }
   const sqlExportOptions = format === "sql" ? await showSqlInsertModeDialog({ allowSplit: true }) : undefined;
   if (format === "sql" && sqlExportOptions === null) return;
-  await exportTableData(row, format, undefined, "name", true, sqlExportOptions?.insertMode ?? "batch", sqlExportOptions?.splitMaxMb);
+  await exportTableData(row, format, undefined, "name", true, sqlExportOptions?.insertMode ?? "batch", sqlExportOptions?.splitMaxMb, insertDialect);
 }
 
 function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<XlsxExportOptions | null> {
@@ -2362,7 +2385,7 @@ async function exportDataXlsx(row: ObjectBrowserRow) {
   await exportTableData(row, "xlsx", columnInfos, exportOptions.headerMode, exportOptions.autoFilter);
 }
 
-async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], headerMode: XlsxHeaderMode = "name", autoFilter = true, insertMode: SqlInsertMode = "batch", splitMaxMb?: number) {
+async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], headerMode: XlsxHeaderMode = "name", autoFilter = true, insertMode: SqlInsertMode = "batch", splitMaxMb?: number, insertDialect: SqlInsertDialect = "source") {
   const schema = row.schema || selectedSchema.value;
   const splitSqlOutput = format === "sql" && splitMaxMb !== undefined;
 
@@ -2399,7 +2422,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
         executePage: (sql) => api.executeQuery(props.connection.id, props.database, sql),
       });
       if (format === "csv") {
-        await api.exportQueryResultCsv(filePath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? []), settingsStore.editorSettings.csvQuoteMode);
+        await api.exportQueryResultCsv(filePath, result.columns, result.rows, settingsStore.editorSettings.csvQuoteMode, csvNullLiteralForMode(settingsStore.editorSettings.csvNullMode));
       } else {
         const comments = result.columns.map((name) => columnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
         const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
@@ -2437,8 +2460,9 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
       tableName: row.name,
       filePath,
       format,
-      ...(format === "sql" ? { insertMode, splitMaxMb } : {}),
+      ...(format === "sql" ? { insertMode, insertDialect, splitMaxMb } : {}),
       csvQuoteMode: settingsStore.editorSettings.csvQuoteMode,
+      nullLiteral: csvNullLiteralForMode(settingsStore.editorSettings.csvNullMode),
       columns,
       columnComments: format === "xlsx" ? columnComments : undefined,
       autoFilter: format === "xlsx" ? autoFilter : undefined,
@@ -2549,7 +2573,7 @@ async function copySelectedTablesToClipboard() {
 }
 
 function canPasteTableClipboard(): boolean {
-  return !isVictoriaMetrics.value && !isMongodb.value && tableClipboardMatchesTarget(normalizedObjectBrowserTableClipboardEntries(), pasteTableTargetContext());
+  return supportsBatchTableActions.value && tableClipboardMatchesTarget(normalizedObjectBrowserTableClipboardEntries(), pasteTableTargetContext());
 }
 
 function normalizedObjectBrowserTableClipboardEntries() {
@@ -2641,7 +2665,7 @@ function openPasteTableDialog() {
 }
 
 function onObjectBrowserKeydown(event: KeyboardEvent) {
-  if (event.defaultPrevented) return;
+  if (event.defaultPrevented || !supportsBatchTableActions.value) return;
   if (eventTargetAllowsAppClipboardShortcut(event, "c")) {
     if (selectedTableCount.value === 0) return;
     event.preventDefault();
@@ -2987,7 +3011,7 @@ async function saveSource() {
 }
 
 async function loadSchemas(epoch: number): Promise<boolean> {
-  if (!objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) return false;
+  if (!schemaListLoadGuard.isEpochCurrent(epoch)) return false;
   if (!needsSchema.value) {
     schemas.value = [];
     selectedSchema.value = undefined;
@@ -3000,7 +3024,7 @@ async function loadSchemas(epoch: number): Promise<boolean> {
     const names = filterSchemaNamesForConnection(await api.listSchemas(connectionId, database), props.connection, database, {
       showSystemSchemas: props.connection.show_system_schemas === true,
     });
-    if (!objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) return false;
+    if (!schemaListLoadGuard.isEpochCurrent(epoch)) return false;
     schemas.value = names;
     if (names.length === 0) {
       selectedSchema.value = undefined;
@@ -3011,7 +3035,7 @@ async function loadSchemas(epoch: number): Promise<boolean> {
     }
     return true;
   } finally {
-    if (objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) loadingSchemas.value = false;
+    if (schemaListLoadGuard.isEpochCurrent(epoch)) loadingSchemas.value = false;
   }
 }
 
@@ -3116,6 +3140,9 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     // Explicit refresh and metadata invalidation still bypass this branch.
     applyObjectBrowserRows(cached.rows);
     finishOnce();
+    // 行数/大小是随对象列表一起缓存的，直接返回缓存会让这两列一直停在上一次统计
+    // （#10461）。对象列表本身仍按上面的约定不动，只把统计信息在后台补一次。
+    if (cached.stale) void revalidateCachedObjectStatistics(request, cacheWriteToken);
     return;
   } else {
     // No scaffold: first load in this scope, cache invalidated by a DDL mutation,
@@ -3181,6 +3208,15 @@ async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheW
   }
 }
 
+/**
+ * Refreshes only the table statistics for rows restored from a stale cache
+ * scaffold. The row list itself is intentionally left untouched, and failures
+ * stay silent because the statistics are decorative.
+ */
+async function revalidateCachedObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken) {
+  await loadObjectStatistics(request, cacheWriteToken, undefined);
+}
+
 function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
   const statsByKey = new Map(stats.map((stat) => [objectStatisticKey(stat.schema || fallbackSchema, stat.name), stat]));
   rows.value = rows.value.map((row) => {
@@ -3205,17 +3241,30 @@ function normalizeStatisticNumber(value: number | null | undefined): number | nu
 }
 
 async function reload(options?: { allowCachedObjects?: boolean; contextEpoch?: number; preserveExistingRows?: boolean }) {
-  const epoch = options?.contextEpoch ?? objectBrowserRowsLoadGuard.invalidate();
-  try {
-    if (!(await loadSchemas(epoch))) return;
-  } catch (e) {
+  const contextEpoch = options?.contextEpoch ?? schemaListLoadGuard.invalidate();
+  // 对象列表只依赖本标签页绑定的 schema，而 schema 列表在部分引擎上可能很慢
+  // （如达梦需要扫描庞大的 SYS.SYSOBJECTS，#8665）。这里让对象列表的加载与
+  // listSchemas 并行进行，避免慢速 schema 列表让标签页长时间停在“没有找到对象”
+  // 的空白态；若 schema 解析结果确实改变了目标 schema，随后按新 schema 重载。
+  const schemaBeforeSchemas = selectedSchema.value;
+  const schemasPromise = loadSchemas(contextEpoch).catch((e) => {
     // listSchemas 失败（如共享连接上 SET SCHEMA 后的二次元数据请求）时，
     // loadSchemas 不会触碰 selectedSchema，这里也不清空它：保留 props.schema
     // 或用户已选值，继续尝试加载对象列表（达梦走用户名回退），避免标签静默
     // 空白 (#8301)。对象列表若同样失败，loadObjects 自身的 catch 会展示错误。
     console.warn("[ObjectBrowser] loadSchemas failed, keeping selected schema for", props.connection.id, e);
+    return false;
+  });
+  const parallelObjectLoad = needsSchema.value && selectedSchema.value ? loadObjects({ allowCached: options?.allowCachedObjects, preserveExistingRows: options?.preserveExistingRows }) : undefined;
+  const schemasLoaded = await schemasPromise;
+  await parallelObjectLoad;
+  if (!schemaListLoadGuard.isEpochCurrent(contextEpoch)) return;
+  if (parallelObjectLoad) {
+    if (schemasLoaded && needsSchema.value && selectedSchema.value !== schemaBeforeSchemas) {
+      await loadObjects({ allowCached: true });
+    }
+    return;
   }
-  if (!objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) return;
   await loadObjects({ allowCached: options?.allowCachedObjects, preserveExistingRows: options?.preserveExistingRows });
 }
 
@@ -3311,13 +3360,15 @@ defineExpose({ focusSearch, refresh, matchesRefreshScope });
 
 onBeforeUnmount(() => {
   objectBrowserRowsLoadGuard.invalidate();
+  schemaListLoadGuard.invalidate();
   stopColumnResize?.();
 });
 
 watch(
   [() => props.connection.id, () => props.database, () => props.schema],
   async () => {
-    const contextEpoch = objectBrowserRowsLoadGuard.invalidate();
+    objectBrowserRowsLoadGuard.invalidate();
+    const contextEpoch = schemaListLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
     objectFilter.value = "all";
@@ -3336,7 +3387,7 @@ watch(
     } catch (e) {
       console.warn("[DBX] ensureConnected failed for", props.connection.id, e);
     }
-    if (!objectBrowserRowsLoadGuard.isEpochCurrent(contextEpoch)) return;
+    if (!schemaListLoadGuard.isEpochCurrent(contextEpoch)) return;
     void reload({ allowCachedObjects: true, contextEpoch });
   },
   { immediate: true },
@@ -3349,7 +3400,10 @@ function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
     { label: "CSV", action: () => exportData(item, "csv") },
     { label: "JSON", action: () => exportData(item, "json") },
   ];
-  if (!isVictoriaMetrics.value) formats.push({ label: "SQL INSERT", action: () => exportData(item, "sql") });
+  if (!isVictoriaMetrics.value) {
+    formats.push({ label: "SQL INSERT", action: () => exportData(item, "sql", "source") });
+    formats.push({ label: t("contextMenu.standardSqlInsert"), action: () => exportData(item, "sql", "standard") });
+  }
   formats.push({ label: "XLSX", action: () => exportDataXlsx(item) });
   return {
     label: t("contextMenu.exportData"),
@@ -3405,6 +3459,14 @@ function selectedBatchTableCountLabel(key: "batchDrop" | "batchTruncate" | "batc
 }
 
 function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  if (effectiveDatabaseType.value === "nebula") {
+    return [
+      { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
+      { label: t("contextMenu.viewDdl"), action: () => openTableInfo(item, "ddl"), icon: FileCode },
+      { label: "", separator: true },
+      { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
+    ];
+  }
   if (isVictoriaMetrics.value) {
     return [
       { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
@@ -3473,6 +3535,14 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 }
 
 function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  if (effectiveDatabaseType.value === "nebula") {
+    return [
+      { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
+      { label: t("contextMenu.viewDdl"), action: () => openTableInfo(item, "ddl"), icon: ScrollText },
+      { label: "", separator: true },
+      { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
+    ];
+  }
   return [
     { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
     { label: t("contextMenu.editView"), action: () => openSource(item), icon: PencilLine },
@@ -3652,7 +3722,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <LayoutGrid class="h-3.5 w-3.5" />
         </button>
       </div>
-      <Button v-if="showInlineCheckboxToggle" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': settingsStore.editorSettings.objectBrowserShowCheckbox }" :title="t('objects.toggleCheckbox')" @click="toggleCheckboxColumn">
+      <Button v-if="showInlineCheckboxToggle && supportsBatchTableActions" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': settingsStore.editorSettings.objectBrowserShowCheckbox }" :title="t('objects.toggleCheckbox')" @click="toggleCheckboxColumn">
         <CheckSquare v-if="settingsStore.editorSettings.objectBrowserShowCheckbox" class="h-3.5 w-3.5" />
         <Square v-else class="h-3.5 w-3.5" />
       </Button>
@@ -3690,14 +3760,14 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <LayoutGrid class="h-3.5 w-3.5" />
           {{ t("objects.viewGrid") }}
         </DropdownMenuItem>
-        <DropdownMenuCheckboxItem :model-value="settingsStore.editorSettings.objectBrowserShowCheckbox" @select.prevent @update:model-value="toggleCheckboxColumn()">{{ t("objects.toggleCheckbox") }}</DropdownMenuCheckboxItem>
+        <DropdownMenuCheckboxItem v-if="supportsBatchTableActions" :model-value="settingsStore.editorSettings.objectBrowserShowCheckbox" @select.prevent @update:model-value="toggleCheckboxColumn()">{{ t("objects.toggleCheckbox") }}</DropdownMenuCheckboxItem>
         <template v-if="showObjectFilter && toolbarTier >= 2">
           <DropdownMenuSeparator />
           <DropdownMenuCheckboxItem v-for="filter in objectFilters" :key="filter" :model-value="objectFilter === filter" @select.prevent @update:model-value="selectObjectFilter(filter)">{{ filterLabel(filter) }}</DropdownMenuCheckboxItem>
         </template>
       </ToolbarOverflowMenu>
     </div>
-    <div v-if="selectedTableCount > 0" class="flex h-9 shrink-0 items-center gap-2 overflow-x-auto border-b bg-muted/30 px-3 text-xs">
+    <div v-if="selectedTableCount > 0 && supportsBatchTableActions" class="flex h-9 shrink-0 items-center gap-2 overflow-x-auto border-b bg-muted/30 px-3 text-xs">
       <div class="min-w-0 flex-1 truncate text-muted-foreground">
         {{ t("objects.selectedTables", { count: selectedTableCount }) }}
       </div>

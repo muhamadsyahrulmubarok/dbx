@@ -14,6 +14,7 @@ import DataGrid from "@/components/grid/DataGrid.vue";
 import DataGridColumnLayoutPopover from "@/components/grid/DataGridColumnLayoutPopover.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
 import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
+import DataGridColumnWidthModeControl from "@/components/grid/DataGridColumnWidthModeControl.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { Switch } from "@/components/ui/switch";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
@@ -715,7 +716,9 @@ async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExporte
     }
   }
 
-  const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null);
+  // Exports consume source text (CSV/SQL), not the live grid's BSON-faithful
+  // cell encoding, so every document store keeps plain JSON cells here.
+  const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null, { documentGridValues: false });
   if (result.columns.length === 0) result.columns = gridResult.value.columns;
   result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : kind === "elasticsearch" ? elasticsearchGridColumnTypesFor(result.columns) : kind === "solr" ? solrGridColumnTypesFor(result.columns) : undefined;
   result.affected_rows = exportedDocuments.length;
@@ -2833,6 +2836,7 @@ defineExpose({ focusSearch });
               </button>
             </div>
           </div>
+          <DataGridColumnWidthModeControl />
           <DataGridFontFamilyControl />
           <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
             <div class="min-w-0 flex items-center gap-2 font-medium">

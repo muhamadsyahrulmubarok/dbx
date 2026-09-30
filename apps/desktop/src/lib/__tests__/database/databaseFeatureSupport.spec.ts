@@ -323,6 +323,10 @@ describe("supportsTableVacuum", () => {
 });
 
 describe("supportsTableImport", () => {
+  it("enables DB2 table import", () => {
+    expect(supportsTableImport("db2")).toBe(true);
+  });
+
   it("enables OceanBase Oracle table import", () => {
     expect(supportsTableImport("oceanbase-oracle")).toBe(true);
   });

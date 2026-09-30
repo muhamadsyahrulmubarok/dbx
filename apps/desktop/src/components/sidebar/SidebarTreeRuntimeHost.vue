@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, watch, onBeforeUnmount, inject, reactive, ref, shallowRef } from "vue";
-import { createRoutedSidebarDialogController } from "./sidebarDialogControllerRouting";
+import { computed, nextTick, watch, onBeforeUnmount, onScopeDispose, inject, reactive, ref, shallowRef } from "vue";
+import { createRoutedSidebarDialogController, routedCanSetCreateDatabaseCharset } from "./sidebarDialogControllerRouting";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useSidebarDataOpenRuntime } from "@/composables/useSidebarDataOpenRuntime";
 import { useSidebarConnectionMutationRuntime } from "@/composables/useSidebarConnectionMutationRuntime";
@@ -87,7 +87,18 @@ import { canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTr
 import { sidebarConnectionVisibleFilterMenu } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectNameFilter";
 import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
-import { hasTableVGroupEntries, isTableVGroupContainerNode, isTableVGroupGroupableRowType, resolveTableVGroupScopeFromNode, selectedTableVGroupMoveTargets, tableVGroupDestinationRows, tableVGroupPathForTable, tableVGroupScopeKey, tableVGroupsEnabled } from "@/lib/table/tableVGroup";
+import {
+  hasTableTreeLoadMore,
+  hasTableVGroupEntries,
+  isTableVGroupContainerNode,
+  isTableVGroupGroupableRowType,
+  resolveTableVGroupScopeFromNode,
+  selectedTableVGroupMoveTargets,
+  tableVGroupDestinationRows,
+  tableVGroupPathForTable,
+  tableVGroupScopeKey,
+  tableVGroupsEnabled,
+} from "@/lib/table/tableVGroup";
 import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
 import { requestObjectBrowserSearchFocus } from "@/lib/tabs/objectBrowserSearchFocus";
@@ -377,12 +388,22 @@ const { toast } = useToast();
 const installedPlugins = ref<InstalledPlugin[]>([]);
 const sidebarPluginRegistry = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value));
 
-void api.listPlugins().then(
-  (plugins) => {
+async function refreshInstalledPlugins() {
+  try {
+    const plugins = await api.listPlugins();
     installedPlugins.value = plugins.filter((plugin) => plugin.compatibility.compatible);
-  },
-  () => {},
-);
+  } catch {
+    // Keep the previous list: an empty registry would drop live plugin context-menu entries.
+  }
+}
+
+// Plugin install/update/uninstall from the Plugin Center broadcasts this event;
+// without it the sidebar registry keeps the mount-time snapshot and the Table /
+// Connection context menus stay empty until DBX restarts.
+const onPluginsChanged = () => void refreshInstalledPlugins();
+window.addEventListener("dbx:plugins-changed", onPluginsChanged);
+onScopeDispose(() => window.removeEventListener("dbx:plugins-changed", onPluginsChanged));
+void refreshInstalledPlugins();
 
 const { highlight } = useSqlHighlighter();
 
@@ -680,7 +701,7 @@ function routeTreeItemDialogController() {
     },
   });
   routedController.pasteTableDataCopySupported = pasteTableDataCopySupported.value;
-  routedController.canSetCreateDatabaseCharset = canSetCreateDatabaseCharset.value;
+  routedController.canSetCreateDatabaseCharset = routedCanSetCreateDatabaseCharset(canSetCreateDatabaseCharset.value, canSetCreateDatabaseLocale.value);
   routedController.canEditDatabaseCharsetCollation = canEditDatabaseCharsetCollation.value;
   routedController.canEditDatabaseComment = canEditDatabaseComment.value;
   emit("open-dialog-controller", routedController);
@@ -873,7 +894,8 @@ async function toggle(requestId = beginNavigationRequest()) {
   // particular, schema-level trigger/type groups have no tableName, so they
   // must use the generic object loader rather than the table-trigger loader.
   const databaseObjectGroup = !!objectTypesForGroupNode(node.type);
-  if (databaseObjectGroup && connectionStore.canUseLoadedTreeNodeToggle(node)) {
+  const needsConfiguredTablePageDrain = node.type === "group-tables" && connectionStore.getConfig(node.connectionId || "")?.sidebar_auto_load_all_tables === true && hasTableTreeLoadMore(node.children ?? []);
+  if (databaseObjectGroup && connectionStore.canUseLoadedTreeNodeToggle(node) && !needsConfiguredTablePageDrain) {
     node.isExpanded = !node.isExpanded;
     if (wasExpanded && shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded);
@@ -1014,6 +1036,9 @@ async function toggle(requestId = beginNavigationRequest()) {
     } else if (node.type === "user-admin" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       queryStore.openUserAdmin(node.connectionId);
+    } else if (node.type === "xugu-user-admin" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
+      queryStore.openXuguUserAdmin(node.connectionId);
     } else if (node.type === "dameng-users" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       queryStore.openDamengUsers(node.connectionId);
@@ -1116,27 +1141,32 @@ async function toggle(requestId = beginNavigationRequest()) {
   }
 }
 
-function runRowClickAction(clickDetail: number, requestId: number) {
+function runRowClickAction(clickDetail: number) {
   const node = activeNode.value;
   if (node.type === "load-more") {
     if (clickDetail > 1) return;
+    beginNavigationRequest();
     void loadMoreObjectGroupChildren();
     return;
   }
   if (node.type === "object-browser") {
     if (clickDetail > 1) return;
+    beginNavigationRequest();
     void openObjectBrowser();
     return;
   }
   if (node.type === "mongo-gridfs") {
+    beginNavigationRequest();
     openMongoTreeData(node);
     return;
   }
   if (node.type === "event") {
+    beginNavigationRequest();
     void openObjectBrowser(false, true);
     return;
   }
   if (node.type === "group-events") {
+    beginNavigationRequest();
     void openObjectBrowser();
     return;
   }
@@ -1145,13 +1175,17 @@ function runRowClickAction(clickDetail: number, requestId: number) {
   // between adjacent rows. Nacos entries are idempotent navigation targets, so
   // do not mistake that rapid one-click switching for a double-click toggle.
   if (!shouldRunTreeNodeRowAction(action, clickDetail, isGroupLabel(node) || isRepeatableNavigationTreeNode(node.type))) return;
+  // A double click emits click(detail=2) before dblclick. Claim ownership only
+  // after that follow-up click has resolved to a real action, otherwise it
+  // makes the first click's pending connection/expansion request look stale.
+  const requestId = beginNavigationRequest();
   if (action === "open-data") {
     scheduleOpenData(node);
   } else if (action === "open-object-browser") {
     void openObjectBrowser(false, false, true);
   } else if (action === "open-object-browser-and-expand") {
     void openObjectBrowser(false, false, true);
-    if (!node.isExpanded) void toggle();
+    if (!node.isExpanded) void toggle(requestId);
   } else if (action === "open-source") {
     openObjectSourceDialog(false);
   } else if (action === "open-extension-details") {
@@ -1541,21 +1575,27 @@ function requestDeleteSelectedNode(): boolean {
 function onDoubleClick(event: MouseEvent) {
   if (dataTabOpenModeFromTreeClick(activeNode.value.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
   if (activeNode.value.type === "event") {
+    beginNavigationRequest();
     void openObjectBrowser(false, true);
     return;
   }
   if (activeNode.value.type === "group-events") {
+    beginNavigationRequest();
     void openObjectBrowser();
     return;
   }
   const action = treeNodeRowDoubleClickAction(activeNode.value.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value, currentDatabaseType(), canOpenConnectionDatabaseBrowser.value, settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
+  // In single-click mode the trailing dblclick normally has no action and must
+  // leave the first click's request ownership intact.
+  if (action === "none") return;
+  const requestId = beginNavigationRequest();
   if (action === "open-database-browser") {
     void openDatabaseBrowser();
   } else if (action === "open-object-browser") {
     void openObjectBrowser(false, false, true);
   } else if (action === "open-object-browser-and-expand") {
     void openObjectBrowser(false, false, true);
-    if (!activeNode.value.isExpanded) void toggle();
+    if (!activeNode.value.isExpanded) void toggle(requestId);
   } else if (action === "open-data") {
     openDataImmediately(activeNode.value);
   } else if (action === "activate-data") {
@@ -1571,7 +1611,7 @@ function onDoubleClick(event: MouseEvent) {
   } else if (action === "toggle" && (activeNode.value.type === "mongo-gridfs" || isDocumentBrowserTreeNode(activeNode.value.type))) {
     openMongoTreeData(activeNode.value);
   } else if (action === "toggle") {
-    toggle();
+    void toggle(requestId);
   }
 }
 
@@ -1804,6 +1844,18 @@ async function openUserAdmin() {
     queryStore.openUserAdmin(node.connectionId);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+  }
+}
+
+async function openXuguUserPermissions() {
+  const node = activeNode.value;
+  if (!node.connectionId) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    queryStore.openXuguUserAdmin(node.connectionId);
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
 }
 
@@ -2735,6 +2787,7 @@ function requestDropTableChildObject() {
 }
 
 function canDropTreeNode(node: TreeNode): boolean {
+  if (databaseTypeForNode(node) === "nebula") return false;
   if (isSqlServerLinkedNode(node)) return false;
   if (node.type === "table") return !!node.connectionId && !!node.database;
   if (node.type === "view" || node.type === "materialized_view" || node.type === "procedure" || node.type === "function" || node.type === "event") {
@@ -3077,6 +3130,7 @@ function requestDropSelectedNodes(): boolean {
 }
 
 function requestDropSelectedNode(): boolean {
+  if (currentDatabaseType() === "nebula") return false;
   if (activeNode.value.type === "table") {
     dropTable();
     return true;
@@ -4701,7 +4755,7 @@ const canOpenSqlFileExecution = computed(() => {
 const canExportAllDatabases = computed(() => {
   if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
   const dbType = connectionStore.getConfig(activeNode.value.connectionId)?.db_type;
-  return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "plugin", "salesforce"].includes(dbType || "");
+  return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "plugin", "salesforce", "nebula"].includes(dbType || "");
 });
 
 const canOpenScheduledBackups = computed(() => {
@@ -5280,7 +5334,7 @@ function databaseDialogCapabilities() {
   return {
     showCreateDatabaseDialog,
     createDatabaseName,
-    canSetCreateDatabaseCharset: canSetCreateDatabaseCharset.value || canSetCreateDatabaseLocale.value,
+    canSetCreateDatabaseCharset: routedCanSetCreateDatabaseCharset(canSetCreateDatabaseCharset.value, canSetCreateDatabaseLocale.value),
     createDatabaseCharset,
     createDatabaseCharsetOptions,
     createDatabaseCharsetLoading,
@@ -5455,7 +5509,10 @@ function exportDataSubmenu(includeSqlInsert = true): ContextMenuItem {
     { label: "CSV", action: () => exportData("csv") },
     { label: "JSON", action: () => exportData("json") },
   ];
-  if (includeSqlInsert) children.push({ label: "SQL INSERT", action: () => exportData("sql") });
+  if (includeSqlInsert) {
+    children.push({ label: "SQL INSERT", action: () => exportData("sql", "source") });
+    children.push({ label: t("contextMenu.standardSqlInsert"), action: () => exportData("sql", "standard") });
+  }
   children.push({ label: "XLSX", action: () => exportDataXlsx() });
   return {
     label: count > 1 ? t("contextMenu.exportDataMultiple", { count }) : t("contextMenu.exportData"),
@@ -5805,6 +5862,19 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       });
       return true;
     }
+    if (currentDatabaseType() === "nebula" && node.type === "database") {
+      if (canCloseDatabaseConnection.value) items.push({ label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
+      items.push(copyNameMenuItem());
+      items.push({ label: "", separator: true });
+      if (canOpenObjectBrowser.value) items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
+      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      const sqlHistoryMenu = savedSqlHistorySubmenu();
+      if (sqlHistoryMenu) items.push(sqlHistoryMenu);
+      items.push({ label: isNodeDefaultDatabase.value ? t("contextMenu.clearDefaultDatabase") : t("contextMenu.setDefaultDatabase"), action: isNodeDefaultDatabase.value ? clearNodeDefaultDatabase : setNodeAsDefaultDatabase, icon: Database });
+      items.push({ label: "", separator: true });
+      items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+      return true;
+    }
     if (canCloseDatabaseConnection.value) {
       items.unshift({ label: "", separator: true });
       items.unshift({ label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
@@ -6020,6 +6090,11 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
+  if (node.type === "xugu-user-admin") {
+    items.push({ label: t("contextMenu.openXuguUserPermissions"), action: openXuguUserPermissions, icon: ShieldCheck });
+    return true;
+  }
+
   if (node.type === "dameng-job-admin") {
     items.push({ label: t("contextMenu.openDamengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });
     return true;
@@ -6202,6 +6277,20 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       }
       items.push({ label: "", separator: true });
       items.push(exportDataSubmenu(false));
+      items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+      appendPluginTableMenuItems(items, node);
+      return true;
+    }
+    if (currentDatabaseType() === "nebula") {
+      items.push(copyNameMenuItem());
+      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ label: "", separator: true });
+      items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
+      items.push({ label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus, shortcut: shortcutOpenDataInNewTab.value });
+      items.push({ label: t("contextMenu.viewDdl"), action: openDdl, icon: FileCode });
+      const sqlHistoryMenu = savedSqlHistorySubmenu();
+      if (sqlHistoryMenu) items.push(sqlHistoryMenu);
+      items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
       appendPluginTableMenuItems(items, node);
       return true;
@@ -6558,7 +6647,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     const mysqlObjectTemplate = node.connectionId ? mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node) : null;
     const hasMongoCreateIndexAction = node.type === "group-indexes" && canCreateMongoIndex.value;
     const hasMongoDropAllIndexesAction = node.type === "group-indexes" && canDropAllMongoIndexes.value;
-    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database) || !!mysqlObjectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
+    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database && currentDatabaseType() !== "nebula") || !!mysqlObjectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
@@ -6569,7 +6658,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
         items.push({ label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard });
       }
     }
-    if (node.type === "group-views" && node.connectionId && node.database) {
+    if (node.type === "group-views" && node.connectionId && node.database && currentDatabaseType() !== "nebula") {
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
     }
     if (node.type === "group-events" && node.connectionId && node.database) {
@@ -6881,9 +6970,8 @@ function buildContextMenu(node: TreeNode): ContextMenuItem[] {
 }
 
 function handleRowClick(node: TreeNode, clickDetail: number) {
-  const requestId = beginNavigationRequest();
   activateRuntimeNode(node);
-  runRowClickAction(clickDetail, requestId);
+  runRowClickAction(clickDetail);
 }
 
 function handleRowDoubleClick(node: TreeNode, event: MouseEvent) {
@@ -6895,7 +6983,6 @@ function handleRowDoubleClick(node: TreeNode, event: MouseEvent) {
     activateRuntimeNode(node);
     return;
   }
-  beginNavigationRequest();
   activateRuntimeNode(node);
   onDoubleClick(event);
 }

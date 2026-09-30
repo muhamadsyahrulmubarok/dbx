@@ -1,6 +1,7 @@
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { hexToRgba } from "@/lib/common/color";
+import { isLegacyWebView } from "@/lib/ui/legacyWebView";
 import type { CSSProperties } from "vue";
 import { findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
 import { supportsConnectionDatabaseInfo } from "@/lib/connection/connectionDatabaseInfo";
@@ -39,6 +40,36 @@ export function connectionGroupDisplayName(connectionId: string, t: Translate): 
 export function connectionColor(connectionId: string): string {
   const connectionStore = useConnectionStore();
   return connectionStore.getConfig(connectionId)?.color || "";
+}
+
+function tabConnectionGeneratedColor(connectionId: string): string {
+  let hash = 2166136261;
+  for (const character of connectionId) {
+    hash ^= character.codePointAt(0)!;
+    hash = Math.imul(hash, 16777619);
+  }
+  const hue = (hash >>> 0) % 360;
+  const saturation = 68;
+  const lightness = 52;
+  const chroma = (1 - Math.abs((2 * lightness) / 100 - 1)) * (saturation / 100);
+  const hueSector = hue / 60;
+  const x = chroma * (1 - Math.abs((hueSector % 2) - 1));
+  const match = lightness / 100 - chroma / 2;
+  const [red, green, blue] = hueSector < 1 ? [chroma, x, 0] : hueSector < 2 ? [x, chroma, 0] : hueSector < 3 ? [0, chroma, x] : hueSector < 4 ? [0, x, chroma] : hueSector < 5 ? [x, 0, chroma] : [chroma, 0, x];
+  return `#${[red, green, blue]
+    .map((channel) =>
+      Math.round((channel + match) * 255)
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("")}`;
+}
+
+/** Returns a stable visual identity for a tab's connection when no custom color is set. */
+export function tabConnectionColor(connectionId: string): string {
+  const configured = connectionColor(connectionId);
+  if (configured) return configured;
+  return tabConnectionGeneratedColor(connectionId);
 }
 
 export function isConnectionReadonly(connectionId: string): boolean {
@@ -262,10 +293,13 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   const connName = connectionDisplayName(tab.connectionId);
   const groupName = connectionGroupDisplayName(tab.connectionId, t);
   const connection = useConnectionStore().getConfig(tab.connectionId);
+  const isPluginTab = tab.mode === "plugin-workbench" || tab.mode === "plugin-filesystem";
+  const database = isPluginTab ? tab.database || connection?.database || "" : tab.database;
+  const showDatabase = (!connection || supportsConnectionDatabaseInfo(connection.db_type)) && (!isPluginTab || Boolean(database.trim()));
   const lines: { label: string; value: string }[] = [
     { label: t("tabs.tooltipConnection"), value: connName },
     ...(groupName ? [{ label: t("tabs.tooltipGroup"), value: groupName }] : []),
-    ...(!connection || supportsConnectionDatabaseInfo(connection.db_type) ? [{ label: t("tabs.tooltipDatabase"), value: databaseDisplayNameForTab(tab.connectionId, tab.database, t) }] : []),
+    ...(showDatabase ? [{ label: t("tabs.tooltipDatabase"), value: databaseDisplayNameForTab(tab.connectionId, database, t) }] : []),
   ];
   if (tab.mode === "query" && queryTitle(tab)) {
     lines.unshift({ label: t("tabs.tooltipTitle"), value: tab.title });
@@ -682,15 +716,38 @@ export function tabIconClass(tab: QueryTab): string {
   return "text-blue-600 dark:text-blue-400";
 }
 
-export function tabColorStyle(tab: QueryTab, active: boolean, isClassic: boolean): CSSProperties | undefined {
-  const activeIndicator = "inset 0 -2px 0 color-mix(in srgb, var(--foreground) 72%, transparent)";
-  const color = connectionColor(tab.connectionId);
-  if (!color) {
-    if (isClassic) {
-      return active ? { "--app-tab-background": "color-mix(in srgb, var(--foreground) 18%, var(--background))", boxShadow: activeIndicator } : undefined;
-    }
-    return active ? { "--app-tab-background": "color-mix(in srgb, var(--foreground) 18%, var(--background))", borderColor: "var(--ring)" } : undefined;
+// WebKit without color-mix() (macOS 12 Safari < 16.2) invalidates these inline
+// values at computed-value time, leaving the active tab with no background at
+// all — and it also fails to substitute var() references inside inline custom
+// properties, so the legacy branch resolves the theme token to concrete rgb
+// once per call instead of leaning on rgba(var(--dbx-foreground-rgb), …).
+function foregroundRgb(): string {
+  if (typeof document !== "undefined") {
+    const rgb = getComputedStyle(document.documentElement).getPropertyValue("--dbx-foreground-rgb").trim();
+    if (rgb) return rgb;
   }
+  return "10, 10, 10";
+}
+
+export function appTabActiveBackground(): string {
+  if (isLegacyWebView()) return `rgba(${foregroundRgb()}, 0.18)`;
+  return "color-mix(in srgb, var(--foreground) 18%, var(--background))";
+}
+
+export function appTabActiveIndicator(): string {
+  if (isLegacyWebView()) return `inset 0 -2px 0 rgba(${foregroundRgb()}, 0.72)`;
+  return "inset 0 -2px 0 color-mix(in srgb, var(--foreground) 72%, transparent)";
+}
+
+export function tabColorStyle(tab: QueryTab, active: boolean, isClassic: boolean): CSSProperties | undefined {
+  if (!useSettingsStore().editorSettings.colorizeConnectionTabs) {
+    const activeIndicator = appTabActiveIndicator();
+    const background = appTabActiveBackground();
+    if (isClassic) return active ? { "--app-tab-background": background, boxShadow: activeIndicator } : undefined;
+    return active ? { "--app-tab-background": background, borderColor: "var(--ring)" } : undefined;
+  }
+  const activeIndicator = appTabActiveIndicator();
+  const color = tabConnectionColor(tab.connectionId);
   if (isClassic) {
     return {
       "--app-tab-background": hexToRgba(color, active ? 0.24 : 0.07),

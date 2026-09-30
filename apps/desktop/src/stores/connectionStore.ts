@@ -151,6 +151,7 @@ import {
   objectTypesForGroupNode,
   tablePartitionGroups,
   withoutTableTreeLoadMoreNodes,
+  tablePageRowAnchorKey,
   type TableTreeLoadMoreParent,
   type DatabaseObjectTreeKind,
 } from "@/lib/table/tableTree";
@@ -431,6 +432,7 @@ type BeforeConnectHandler = (config: ConnectionConfig) => Promise<void>;
 export const CONNECTION_ATTEMPT_CANCELLED_MESSAGE = "Connection attempt was cancelled";
 /** Thrown when a no-save-password connection is connected without a typed password. */
 export const CONNECTION_PASSWORD_REQUIRED_MESSAGE = "Password is required for this connection";
+const PLUGIN_CONFIG_RECONNECT_PASSWORD_MESSAGE = "Plugin settings were saved, but the connection was disconnected because its password is not available. Reconnect manually to apply the new settings.";
 
 function metadataDriverProfile(config?: ConnectionConfig): string | undefined {
   return config?.driver_profile || config?.db_type;
@@ -587,7 +589,7 @@ export const useConnectionStore = defineStore("connection", () => {
     schema?: string;
     tableName?: string;
   } | null>(null);
-  const sqlFileSource = ref<{ connectionId: string; database: string; filePath?: string; preview?: SqlFilePreview } | null>(null);
+  const sqlFileSource = ref<{ connectionId: string; database: string; schema?: string; filePath?: string; preview?: SqlFilePreview } | null>(null);
   const diagramSource = ref<{
     connectionId: string;
     database: string;
@@ -1669,6 +1671,7 @@ export const useConnectionStore = defineStore("connection", () => {
       informix: "Informix",
       phoenix: "Apache Phoenix",
       neo4j: "Neo4j",
+      nebula: "NebulaGraph",
       cassandra: "Cassandra",
       bigquery: "BigQuery",
       spanner: "Cloud Spanner",
@@ -1719,6 +1722,7 @@ export const useConnectionStore = defineStore("connection", () => {
       docs_notes_path: config.docs_notes_path?.trim() ? config.docs_notes_path.trim() : undefined,
       transport_layers: Array.isArray(config.transport_layers) ? config.transport_layers : [],
       show_system_schemas: config.show_system_schemas === true,
+      sidebar_auto_load_all_tables: config.sidebar_auto_load_all_tables === true,
       connect_timeout_secs: connectTimeoutInherit ? settingsStore.editorSettings.globalConnectTimeoutSecs : config.connect_timeout_secs || 10,
       connect_timeout_inherit: connectTimeoutInherit,
       query_timeout_secs: queryTimeoutInherit ? settingsStore.editorSettings.globalQueryTimeoutSecs : (config.query_timeout_secs ?? DEFAULT_QUERY_TIMEOUT_SECS),
@@ -1820,7 +1824,7 @@ export const useConnectionStore = defineStore("connection", () => {
     // as metadata children, withConnectionUtilityNodes would keep the old copies
     // AND append fresh ones on every useCachedChildren pass, duplicating the
     // 用户/角色 menus once per refresh cycle.
-    return node.type === "oracle-db-links" || node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "group-tablespaces" || node.type === "saved-sql-root";
+    return node.type === "oracle-db-links" || node.type === "user-admin" || node.type === "xugu-user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "group-tablespaces" || node.type === "saved-sql-root";
   }
 
   function connectionMetadataChildren(children: TreeNode[] | undefined): TreeNode[] {
@@ -1963,8 +1967,6 @@ export const useConnectionStore = defineStore("connection", () => {
     children = dedupeTreeNodeChildrenById(children);
     if (shouldClearDescendantLoadedMarkers(parent, children)) {
       clearDescendantLoadedChildrenMarkers(parent.id);
-      // Parent load may still be current; only supersede descendant generations.
-      treeNodeLoads.invalidateDescendants(parent.id);
     }
     if (parent.children && parent.children.length > 0) {
       const oldMap = new Map(parent.children.map((c) => [c.id, c] as const));
@@ -2090,6 +2092,20 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  function buildXuguUserAdminNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
+    const config = getConfig(connectionId);
+    if (effectiveDatabaseTypeForConnection(config) !== "xugu") return undefined;
+    const existing = existingConnectionNode?.children?.find((child) => child.type === "xugu-user-admin");
+    return {
+      id: `${connectionId}:__xugu_user_admin`,
+      label: "tree.xuguUserPermissions",
+      type: "xugu-user-admin",
+      connectionId,
+      database: config?.database || "",
+      isExpanded: existing?.isExpanded ?? false,
+    };
+  }
+
   function buildDamengUserNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
     const config = getConfig(connectionId);
     if (effectiveDatabaseTypeForConnection(config) !== "dameng") return undefined;
@@ -2198,11 +2214,12 @@ export const useConnectionStore = defineStore("connection", () => {
   function withConnectionUtilityNodes(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
     const nonUtilityChildren = connectionMetadataChildren(children);
     const userAdminNode = buildUserAdminNode(connectionId, existingConnectionNode);
+    const xuguUserAdminNode = buildXuguUserAdminNode(connectionId, existingConnectionNode);
     const damengUserNode = buildDamengUserNode(connectionId, existingConnectionNode);
     const damengRoleNode = buildDamengRoleNode(connectionId, existingConnectionNode);
     const damengJobAdminNode = buildDamengJobAdminNode(connectionId, existingConnectionNode);
     const xuguTablespacesNode = buildXuguTablespacesNode(connectionId, existingConnectionNode);
-    return [...nonUtilityChildren, buildOracleDatabaseLinksNode(connectionId, existingConnectionNode), userAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, xuguTablespacesNode].filter(Boolean) as TreeNode[];
+    return [...nonUtilityChildren, buildOracleDatabaseLinksNode(connectionId, existingConnectionNode), userAdminNode, xuguUserAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, xuguTablespacesNode].filter(Boolean) as TreeNode[];
   }
 
   function withSavedSqlRoot(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
@@ -2495,9 +2512,14 @@ export const useConnectionStore = defineStore("connection", () => {
   function invalidateConnectionMetadataLifetime(connectionId: string, database?: string) {
     invalidateMetadataCaches({ connectionId, database });
     bumpMetadataGeneration(connectionId, database);
-    void import("@/stores/queryStore").then(({ useQueryStore }) => {
-      useQueryStore().staleConnectionDataTabMetadata(connectionId, database);
-    });
+    // 该 import 是「稍后清理 freshness」的尽力而为路径：断开连接后数据标签页的
+    // tableMeta 不再算 warm cache，晚一点清也安全。因此这里必须吞掉失败，避免
+    // chunk 加载失败（或测试环境已销毁）变成未处理的拒绝。
+    void import("@/stores/queryStore")
+      .then(({ useQueryStore }) => {
+        useQueryStore().staleConnectionDataTabMetadata(connectionId, database);
+      })
+      .catch(() => undefined);
   }
 
   function invalidateMetadataCaches(match: MetadataCacheInvalidation): number {
@@ -2554,7 +2576,67 @@ export const useConnectionStore = defineStore("connection", () => {
     void invalidateObjectDdlCache(match);
   }
 
-  function buildLoadMoreNode(parent: TreeNode, offset: number, pageSize: number): TreeNode {
+  type PagedTableWindow = {
+    children: TreeNode[];
+    objectCount: number;
+    hasMore: boolean;
+    nextOffset: number;
+    loadMoreParent?: TableTreeLoadMoreParent;
+    /** Folded identity of the row that opened this page. */
+    firstAnchor?: string;
+    /** Folded identity of the page's peek row, i.e. the row the next page must open with. */
+    nextAnchor?: string;
+  };
+
+  /** Structural view shared by `TableInfo` and `ObjectInfo` rows of a paged list. */
+  type PagedRowIdentity = {
+    name: string;
+    schema?: string | null;
+    parent_schema?: string | null;
+    parent_name?: string | null;
+  };
+
+  function tablePageAnchorKeyOf(row: PagedRowIdentity, fallbackSchema?: string) {
+    // Partitioned tables need the parent in the key: their child tables may share a name.
+    return tablePageRowAnchorKey(row.name, row.parent_schema ?? row.schema ?? fallbackSchema, row.parent_name);
+  }
+
+  /**
+   * Anchors for one fetched page. Paged loads ask for `pageSize + 1` rows and keep only
+   * `pageSize` of them, so the extra probe row is exactly the row the next page has to
+   * open with. Remembering it is what makes offset paging able to notice that the
+   * ordered window moved (objects created or dropped above it) instead of silently
+   * skipping rows (#9400).
+   */
+  function tablePageAnchors(rows: readonly PagedRowIdentity[], pageSize: number, hasMore: boolean, fallbackSchema?: string) {
+    const first = rows[0];
+    const peek = hasMore ? rows[pageSize] : undefined;
+    return {
+      firstAnchor: first ? tablePageAnchorKeyOf(first, fallbackSchema) : undefined,
+      nextAnchor: peek ? tablePageAnchorKeyOf(peek, fallbackSchema) : undefined,
+    };
+  }
+
+  /**
+   * Offset paging is not snapshot consistent: when the object set changes above the
+   * window between two page loads, the same offset points at a different row, so the
+   * next page would be appended with a gap (or an overlap) in it (#9400). A page that
+   * does not open with the anchored row — including one that comes back empty because
+   * rows above the window were dropped — re-reads the whole displayed range instead:
+   * offset 0 always starts at the same row, so one request lands the tree exactly on
+   * the current server state, and the widened window still reports the correct
+   * `nextOffset` / `hasMore` for continuing.
+   */
+  async function loadTablePageCheckingAnchor<T extends PagedTableWindow>(anchor: string | undefined, offset: number, pageSize: number, fetchPage: (offset: number, pageSize: number) => Promise<T>): Promise<T> {
+    const page = await fetchPage(offset, pageSize);
+    if (!anchor || offset <= 0) return page;
+    // An empty page at a non-zero offset is drift too: the objects above the window
+    // were removed, so the offset now points past the end of the list.
+    if (page.firstAnchor === anchor) return page;
+    return fetchPage(0, offset + pageSize);
+  }
+
+  function buildLoadMoreNode(parent: TreeNode, offset: number, pageSize: number, anchor?: string): TreeNode {
     return {
       id: `${parent.id}:__load_more:${offset}`,
       label: "tree.loadMore",
@@ -2567,6 +2649,7 @@ export const useConnectionStore = defineStore("connection", () => {
         parentId: parent.id,
         offset,
         pageSize,
+        ...(anchor ? { anchor } : {}),
       },
     };
   }
@@ -2668,7 +2751,7 @@ export const useConnectionStore = defineStore("connection", () => {
     searchFilter?: string;
     pagedSearch?: boolean;
     force?: boolean;
-  }): Promise<{ children: TreeNode[]; objectCount: number; hasMore: boolean; nextOffset: number; loadMoreParent?: TableTreeLoadMoreParent }> {
+  }): Promise<PagedTableWindow> {
     if (!options.node.connectionId || options.node.database == null) {
       return { children: [], objectCount: 0, hasMore: false, nextOffset: options.offset };
     }
@@ -2725,20 +2808,11 @@ export const useConnectionStore = defineStore("connection", () => {
       hasMore,
       nextOffset: options.offset + pageTables.length,
       loadMoreParent: lastTable?.parent_name ? { schema: lastTable.parent_schema, name: lastTable.parent_name } : undefined,
+      ...tablePageAnchors(tables, options.pageSize, hasMore, options.effectiveSchema),
     };
   }
 
-  async function loadPagedObjectGroupChildren(options: {
-    node: TreeNode;
-    parentNodeId: string;
-    querySchema: string;
-    effectiveSchema?: string;
-    objectTypes: DatabaseObjectTreeKind[];
-    offset: number;
-    pageSize: number;
-    searchFilter?: string;
-    force?: boolean;
-  }): Promise<{ children: TreeNode[]; objectCount: number; hasMore: boolean; nextOffset: number }> {
+  async function loadPagedObjectGroupChildren(options: { node: TreeNode; parentNodeId: string; querySchema: string; effectiveSchema?: string; objectTypes: DatabaseObjectTreeKind[]; offset: number; pageSize: number; searchFilter?: string; force?: boolean }): Promise<PagedTableWindow> {
     if (!options.node.connectionId || options.node.database == null) {
       return { children: [], objectCount: 0, hasMore: false, nextOffset: options.offset };
     }
@@ -2787,6 +2861,7 @@ export const useConnectionStore = defineStore("connection", () => {
       objectCount: children.length,
       hasMore,
       nextOffset: options.offset + pageObjects.length,
+      ...tablePageAnchors(objects, options.pageSize, hasMore, options.effectiveSchema),
     };
   }
 
@@ -2802,7 +2877,7 @@ export const useConnectionStore = defineStore("connection", () => {
     searchFilter?: string;
     pagedSearch?: boolean;
     force?: boolean;
-  }): Promise<{ children: TreeNode[]; objectCount: number; hasMore: boolean; nextOffset: number; loadMoreParent?: TableTreeLoadMoreParent }> {
+  }): Promise<PagedTableWindow> {
     const searchFilter = (options.searchFilter ?? sidebarSearchQuery.value) || undefined;
     const tableNameFilter = activeTableNameFilterForScope({
       connectionId: options.connectionId,
@@ -2850,6 +2925,7 @@ export const useConnectionStore = defineStore("connection", () => {
       hasMore,
       nextOffset: options.offset + pageTables.length,
       loadMoreParent: lastTable?.parent_name ? { schema: lastTable.parent_schema, name: lastTable.parent_name } : undefined,
+      ...tablePageAnchors(tables, options.pageSize, hasMore, options.effectiveSchema),
     };
   }
 
@@ -3974,7 +4050,10 @@ export const useConnectionStore = defineStore("connection", () => {
     if (config.save_password === false) config.password = "";
     const idx = connections.value.findIndex((c) => c.id === config.id);
     if (idx < 0) return;
-    const runtimeConfigChanged = connectionConfigFingerprint(connections.value[idx]) !== connectionConfigFingerprint(config);
+    const previousConfig = normalizeConnection(connections.value[idx]);
+    const previousDatabase = previousConfig.database ?? "";
+    const runtimeConfigChanged = connectionConfigFingerprint(previousConfig) !== connectionConfigFingerprint(config);
+    const shouldReconnectPlugin = runtimeConfigChanged && previousConfig.db_type === "plugin" && config.db_type === "plugin" && connectedIds.value.has(config.id);
     const nextConnections = [...connections.value];
     nextConnections[idx] = config;
     await persistTimeoutInheritance(config.id, config.connect_timeout_inherit === true, config.query_timeout_inherit === true);
@@ -3984,6 +4063,11 @@ export const useConnectionStore = defineStore("connection", () => {
     rebuildTreeNodes();
     if (!runtimeConfigChanged) return;
     clearEtcdAccessCapabilities(config.id);
+    // Tabs opened before this edit keep whatever database they were created
+    // with (queryStore snapshots it onto the tab); re-point the ones still on
+    // the old default so their query executor stops running against it (#7905).
+    const { useQueryStore } = await import("@/stores/queryStore");
+    useQueryStore().syncTabsDatabaseForConnectionEdit(config.id, previousDatabase, config.database ?? "");
     clearPrimaryVisibleObjectNames(config.id);
     connectedIds.value.delete(config.id);
     clearSidebarStorageCaches(config.id);
@@ -3997,6 +4081,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (node?.isExpanded) {
       await reloadConnectionDatabaseChildren(config.id);
     }
+    if (shouldReconnectPlugin) await reconnectPluginConnectionAfterConfigUpdate(config);
   }
 
   async function updateRedisKeyGrouping(connectionId: string, grouping: import("@/lib/redis/redisKeyGrouping").RedisKeyGrouping) {
@@ -4200,7 +4285,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   // 显式勾选 + 通配符模式一并保存（#7164）：模式对之后新建的库持续生效
-  async function setVisibleDatabaseFilter(connectionId: string, databaseNames: string[], patterns: string[]) {
+  async function setVisibleDatabaseFilter(connectionId: string, databaseNames: string[] | undefined, patterns: string[]) {
     const config = getConfig(connectionId);
     if (!config) return;
     const normalizedPatterns = patterns.map((pattern) => pattern.trim()).filter((pattern) => pattern !== "");
@@ -4209,7 +4294,8 @@ export const useConnectionStore = defineStore("connection", () => {
     const nextConnections = [...connections.value];
     nextConnections[idx] = {
       ...nextConnections[idx],
-      visible_databases: normalizeVisibleDatabaseSelection(databaseNames, databaseNames),
+      // 空名单等于"一个库都不显示"，只可能是误写；弹窗层的"全选"已折算成 undefined。
+      visible_databases: databaseNames && databaseNames.length > 0 ? normalizeVisibleDatabaseSelection(databaseNames, databaseNames) : undefined,
       visible_database_patterns: normalizedPatterns.length > 0 ? normalizedPatterns : undefined,
     };
     await persistConnections(nextConnections);
@@ -4712,7 +4798,7 @@ export const useConnectionStore = defineStore("connection", () => {
     invalidateConnectionMetadataLifetime(connectionId, database);
   }
 
-  async function ensureConnected(connectionId: string, options: { activate?: boolean; verifyHealth?: boolean; forceReconnect?: boolean } = {}) {
+  async function ensureConnected(connectionId: string, options: { activate?: boolean; verifyHealth?: boolean; forceReconnect?: boolean; allowPasswordPrompt?: boolean } = {}) {
     if (!options.forceReconnect && connectedIds.value.has(connectionId)) {
       // Pure navigation can safely trust the existing connected state. Its
       // destination will perform the real API request, while blocking here on
@@ -4769,6 +4855,7 @@ export const useConnectionStore = defineStore("connection", () => {
       // in-flight dedup above keeps its exact microtask cadence; only await the
       // interactive prompt when the connection actually needs a typed password.
       if (connectionNeedsPasswordPrompt(config) && (await pluginConnectionPasswordPromptNeeded(config)) && !(await hasSessionCredential(connectionId))) {
+        if (options.allowPasswordPrompt === false) throw new Error(CONNECTION_PASSWORD_REQUIRED_MESSAGE);
         const prompted = await ensureConnectionPassword(config);
         config = prompted.config;
         rememberPassword = prompted.rememberPassword;
@@ -4831,6 +4918,31 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  async function canReconnectPluginConnectionWithoutPrompt(config: ConnectionConfig): Promise<boolean> {
+    if (!connectionNeedsPasswordPrompt(config)) return true;
+    if (!(await pluginConnectionPasswordPromptNeeded(config))) return true;
+    return hasSessionCredential(config.id);
+  }
+
+  async function reconnectPluginConnectionAfterConfigUpdate(config: ConnectionConfig): Promise<void> {
+    if (!(await canReconnectPluginConnectionWithoutPrompt(config))) {
+      try {
+        await startDisconnectRequest(config.id);
+        setConnectionError(config.id, PLUGIN_CONFIG_RECONNECT_PASSWORD_MESSAGE);
+      } catch (error) {
+        setConnectionError(config.id, `Plugin settings were saved, but DBX could not disconnect the stale plugin connection: ${connectionErrorMessage(error)}. Reconnect manually to apply the new settings.`);
+      }
+      return;
+    }
+
+    try {
+      await ensureConnected(config.id, { activate: false, forceReconnect: true, allowPasswordPrompt: false });
+    } catch (error) {
+      connectedIds.value.delete(config.id);
+      setConnectionError(config.id, `Plugin settings were saved, but automatic reconnection failed: ${connectionErrorMessage(error)}`);
+    }
+  }
+
   /**
    * Re-push an already-open plugin connection's config (credentials included)
    * to its sidecar through the same connection/connect path used when opening
@@ -4853,18 +4965,15 @@ export const useConnectionStore = defineStore("connection", () => {
     // plugin's first `ready`. The 2s in-memory TTL dies with the frontend, so
     // every realistic reload path still re-pushes.
     if (hasRecentConnectionHealthCheck(connectionId)) return;
-    if (connectionNeedsPasswordPrompt(config) && (await pluginConnectionPasswordPromptNeeded(config)) && !(await hasSessionCredential(connectionId))) return;
-    await ensureConnected(connectionId, { activate: false, forceReconnect: true });
+    if (!(await canReconnectPluginConnectionWithoutPrompt(config))) return;
+    await ensureConnected(connectionId, { activate: false, forceReconnect: true, allowPasswordPrompt: false });
   }
 
   /**
    * Explicit, user-triggered reconnect of a plugin connection (the plugin's own
    * "reconnect" button). Unlike repushPluginConnection — the silent background
    * heal — this runs the full connect flow and MAY show the interactive
-   * password prompt, which is appropriate for a deliberate user action. Editing
-   * a connection drops it from connectedIds without notifying plugins, so the
-   * sidecar's config goes stale; this is the plugin's way to request a fresh
-   * connection/connect with the updated config.
+   * password prompt, which is appropriate for a deliberate user action.
    */
   async function reopenPluginConnection(connectionId: string, pluginId: string): Promise<void> {
     const config = getConfig(connectionId);
@@ -6328,7 +6437,7 @@ export const useConnectionStore = defineStore("connection", () => {
               pagedSearch: isSidebarTableSearch,
               force: options?.force,
             });
-            children = page.hasMore && (!searchFilter || isSidebarTableSearch) ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, pageSize), page.loadMoreParent) : page.children;
+            children = page.hasMore && (!searchFilter || isSidebarTableSearch) ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, pageSize, page.nextAnchor), page.loadMoreParent) : page.children;
             nextObjectCount = page.objectCount;
           } else if (simpleObjectDisplay) {
             // The synthetic public scope contains no tables. Avoid issuing a
@@ -6389,9 +6498,9 @@ export const useConnectionStore = defineStore("connection", () => {
     );
   }
 
-  async function loadObjectGroupChildren(node: TreeNode, options?: LoadTreeOptions): Promise<void> {
+  async function loadObjectGroupFirstPage(node: TreeNode, options?: LoadTreeOptions): Promise<void> {
     if (options?.sidebarSearch) {
-      return withSidebarSearchLoad(node.connectionId, () => loadObjectGroupChildren(node, { ...options, sidebarSearch: false }));
+      return withSidebarSearchLoad(node.connectionId, () => loadObjectGroupFirstPage(node, { ...options, sidebarSearch: false }));
     }
     // Queued search/refresh tasks can outlive disconnect, which removes their nodes.
     if (!treeNodeInSidebarTree(node)) return;
@@ -6419,7 +6528,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!options?.force && !searchFilter && !options?.sidebarTableSearchParentId && !tableNameFilterForScope) {
       if (await hydrateTreeNodeFromCache(node, objectGroupCacheKey(node))) {
         forgetFilteredObjectGroupChildren(node.id);
-        void loadObjectGroupChildren(node, { ...options, force: true }).catch(() => undefined);
+        void loadObjectGroupFirstPage(node, { ...options, force: true }).catch(() => undefined);
         return;
       }
     }
@@ -6490,7 +6599,7 @@ export const useConnectionStore = defineStore("connection", () => {
               pagedSearch: isSidebarTableSearch,
               force: options?.force,
             });
-            children = page.hasMore && (!searchFilter || isSidebarTableSearch) ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, sidebarObjectGroupPageSize()), page.loadMoreParent) : page.children;
+            children = page.hasMore && (!searchFilter || isSidebarTableSearch) ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, sidebarObjectGroupPageSize(), page.nextAnchor), page.loadMoreParent) : page.children;
             nextObjectCount = page.objectCount;
           } else {
             const pageSize = sidebarObjectGroupPageSize();
@@ -6505,7 +6614,7 @@ export const useConnectionStore = defineStore("connection", () => {
               searchFilter: searchFilter || undefined,
               force: options?.force,
             });
-            children = page.hasMore && !searchFilter ? [...page.children, buildLoadMoreNode(node, page.nextOffset, pageSize)] : page.children;
+            children = page.hasMore && !searchFilter ? [...page.children, buildLoadMoreNode(node, page.nextOffset, pageSize, page.nextAnchor)] : page.children;
             nextObjectCount = page.objectCount;
           }
           if (isTreeLoadSearchChanged(searchFilter, options)) return;
@@ -6540,6 +6649,23 @@ export const useConnectionStore = defineStore("connection", () => {
       },
       options,
     );
+  }
+
+  function shouldAutoLoadAllTableGroupChildren(node: TreeNode, options?: LoadTreeOptions): boolean {
+    if (node.type !== "group-tables" || !node.connectionId) return false;
+    if (getConfig(node.connectionId)?.sidebar_auto_load_all_tables !== true) return false;
+    // Search projections have their own bounded/paged lifecycle. Automatically
+    // draining those pages would turn a filter operation into an unbounded load
+    // and could replace the unfiltered snapshot that clearing search restores.
+    return !options?.sidebarSearch && !options?.sidebarTableSearchParentId && !activeTreeLoadSearchFilter(options);
+  }
+
+  async function loadObjectGroupChildren(node: TreeNode, options?: LoadTreeOptions): Promise<void> {
+    if (shouldAutoLoadAllTableGroupChildren(node, options)) {
+      await loadAllObjectGroupChildren(node, options);
+      return;
+    }
+    await loadObjectGroupFirstPage(node, options);
   }
 
   async function loadCustomTypeChildren(node: TreeNode, options?: LoadTreeOptions) {
@@ -6614,24 +6740,26 @@ export const useConnectionStore = defineStore("connection", () => {
             const config = getConfig(parentConnectionId);
             const querySchema = connectionObjectTreeQuerySchema(config, parentDatabase, parent.schema);
             const effectiveSchema = connectionObjectTreeNodeSchema(config, parentDatabase, parent.schema);
-            const page = await loadPagedSimpleTableChildren({
-              nodeId: parent.schema ? `${parentConnectionId}:${parentDatabase}:${parent.schema}` : `${parentConnectionId}:${parentDatabase}`,
-              connectionId: parentConnectionId,
-              database: parentDatabase,
-              querySchema,
-              effectiveSchema,
-              nonTableObjectTypes: [],
-              offset: loadMore.offset,
-              pageSize: loadMore.pageSize,
-              searchFilter: options?.searchFilter,
-              pagedSearch: !!options?.searchFilter,
-              force: false,
-            });
+            const page = await loadTablePageCheckingAnchor(loadMore.anchor, loadMore.offset, loadMore.pageSize, (offset, pageSize) =>
+              loadPagedSimpleTableChildren({
+                nodeId: parent.schema ? `${parentConnectionId}:${parentDatabase}:${parent.schema}` : `${parentConnectionId}:${parentDatabase}`,
+                connectionId: parentConnectionId,
+                database: parentDatabase,
+                querySchema,
+                effectiveSchema,
+                nonTableObjectTypes: [],
+                offset,
+                pageSize,
+                searchFilter: options?.searchFilter,
+                pagedSearch: !!options?.searchFilter,
+                force: false,
+              }),
+            );
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
             if (!targetParent || !parentEpoch.isCurrent()) return;
             const currentChildren = withoutTableTreeLoadMoreNodes(targetParent.children);
             const mergedChildren = mergeTableTreePageChildren(currentChildren, page.children, parentConnectionId, parentDatabase);
-            const nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize), page.loadMoreParent) : mergedChildren;
+            const nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor), page.loadMoreParent) : mergedChildren;
             targetParent.objectCount = mergedChildren.length;
             setChildren(targetParent, nextChildren);
             if (!options?.searchFilter) {
@@ -6656,40 +6784,44 @@ export const useConnectionStore = defineStore("connection", () => {
           let mergedChildren: TreeNode[];
           let nextChildren: TreeNode[];
           if (wantsOnlyTablesOrViews) {
-            const page = await loadPagedTableGroupChildren({
-              node: parent,
-              parentNodeId,
-              querySchema,
-              effectiveSchema,
-              objectTypes,
-              offset: loadMore.offset,
-              pageSize: loadMore.pageSize,
-              searchFilter: options?.searchFilter,
-              pagedSearch: !!options?.searchFilter,
-              force: false,
-            });
+            const page = await loadTablePageCheckingAnchor(loadMore.anchor, loadMore.offset, loadMore.pageSize, (offset, pageSize) =>
+              loadPagedTableGroupChildren({
+                node: parent,
+                parentNodeId,
+                querySchema,
+                effectiveSchema,
+                objectTypes,
+                offset,
+                pageSize,
+                searchFilter: options?.searchFilter,
+                pagedSearch: !!options?.searchFilter,
+                force: false,
+              }),
+            );
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
             if (!targetParent || !parentEpoch.isCurrent()) return;
             const currentChildren = withoutTableTreeLoadMoreNodes(targetParent.children);
             mergedChildren = mergeTableTreePageChildren(currentChildren, page.children, parentConnectionId, parentDatabase);
-            nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize), page.loadMoreParent) : mergedChildren;
+            nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor), page.loadMoreParent) : mergedChildren;
           } else {
-            const page = await loadPagedObjectGroupChildren({
-              node: parent,
-              parentNodeId,
-              querySchema,
-              effectiveSchema,
-              objectTypes,
-              offset: loadMore.offset,
-              pageSize: loadMore.pageSize,
-              searchFilter: options?.searchFilter,
-              force: false,
-            });
+            const page = await loadTablePageCheckingAnchor(loadMore.anchor, loadMore.offset, loadMore.pageSize, (offset, pageSize) =>
+              loadPagedObjectGroupChildren({
+                node: parent,
+                parentNodeId,
+                querySchema,
+                effectiveSchema,
+                objectTypes,
+                offset,
+                pageSize,
+                searchFilter: options?.searchFilter,
+                force: false,
+              }),
+            );
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
             if (!targetParent || !parentEpoch.isCurrent()) return;
             const currentChildren = withoutLoadMoreNodes(targetParent.children);
             mergedChildren = mergeLocatedTreeChildren(targetParent, currentChildren, page.children, parentConnectionId, parentDatabase);
-            nextChildren = page.hasMore ? [...mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize)] : mergedChildren;
+            nextChildren = page.hasMore ? [...mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor)] : mergedChildren;
             targetParent.objectCount = mergedChildren.length;
             setChildren(targetParent, nextChildren);
             if (!options?.searchFilter) {
@@ -6883,14 +7015,15 @@ export const useConnectionStore = defineStore("connection", () => {
     );
   }
 
-  async function loadAllObjectGroupChildren(parent: TreeNode) {
+  async function loadAllObjectGroupChildren(parent: TreeNode, initialLoadOptions?: LoadTreeOptions) {
     if (!parent.connectionId || !hasTreeNodeDatabaseContext(parent)) return;
     if (!objectTypesForGroupNode(parent.type)) return;
     const liveParent = treeNodeInSidebarTree(parent);
     if (!liveParent) return;
-    if (!isTreeNodeChildrenLoaded(liveParent.id) || filteredObjectGroupChildrenIds.has(liveParent.id)) {
+    if (initialLoadOptions?.force || !isTreeNodeChildrenLoaded(liveParent.id) || filteredObjectGroupChildrenIds.has(liveParent.id)) {
       let isPreparedPageCurrent: (() => boolean) | undefined;
-      await loadObjectGroupChildren(liveParent, {
+      await loadObjectGroupFirstPage(liveParent, {
+        ...initialLoadOptions,
         force: true,
         searchFilter: "",
         allowGlobalSearchMismatch: true,
@@ -8971,10 +9104,12 @@ export const useConnectionStore = defineStore("connection", () => {
     const oracleIdentifier = effectiveDbType === "oracle" || effectiveDbType === "oceanbase-oracle";
     const uppercaseUnquotedIdentifier = oracleIdentifier || effectiveDbType === "saphana";
     const completionTable = uppercaseUnquotedIdentifier && context?.tableQuoted === false ? table.toUpperCase() : table;
-    const rawCompletionSchema = schema?.trim() || (effectiveDbType === "dameng" ? config?.username?.trim() || undefined : undefined);
+    const normalizedSchema = schema?.trim();
+    const rawCompletionSchema = effectiveDbType === "spanner" ? normalizedSchema : normalizedSchema || (effectiveDbType === "dameng" ? config?.username?.trim() || undefined : undefined);
     const completionSchema = uppercaseUnquotedIdentifier && rawCompletionSchema && context?.schemaQuoted === false ? rawCompletionSchema.toUpperCase() : rawCompletionSchema;
     const usesCurrentSchema = usesOracleCurrentSchemaCompletion(effectiveDbType, completionSchema);
-    if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(config) && !completionSchema && !usesCurrentSchema) {
+    const hasCompletionSchema = completionSchema != null && (completionSchema !== "" || effectiveDbType === "spanner");
+    if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(config) && !hasCompletionSchema && !usesCurrentSchema) {
       return [];
     }
     const sessionCacheScope = usesCurrentSchema && context?.clientSessionId ? `:${context.clientSessionId}:${context.version ?? 0}` : "";
@@ -9120,8 +9255,13 @@ export const useConnectionStore = defineStore("connection", () => {
     return null;
   }
 
-  async function persistConnections(nextConnections: ConnectionConfig[] = connections.value) {
-    await api.saveConnections(nextConnections.filter((connection) => connection.one_time !== true));
+  async function persistConnections(nextConnections: ConnectionConfig[] = connections.value, removedIds: string[] = []) {
+    const configs = nextConnections.filter((connection) => connection.one_time !== true);
+    if (removedIds.length) {
+      await api.saveConnections(configs, removedIds);
+      return;
+    }
+    await api.saveConnections(configs);
   }
 
   function sameIds(left: string[], right: string[]) {
@@ -9170,6 +9310,10 @@ export const useConnectionStore = defineStore("connection", () => {
     const nextConnectTimeoutIds = previousConnectTimeoutIds.filter((id) => nextConnections.some((connection) => connection.id === id));
     const nextQueryTimeoutIds = previousQueryTimeoutIds.filter((id) => nextConnections.some((connection) => connection.id === id));
     const connectionsChanged = nextConnections.length !== previousConnections.length || nextConnections.some((connection, index) => connection !== previousConnections[index]);
+    // Deletion is explicit: the backend upserts whatever the save carries, so the
+    // ids this client dropped from its list have to be named in the request.
+    const nextConnectionIds = new Set(nextConnections.map((connection) => connection.id));
+    const removedConnectionIds = previousConnections.filter((connection) => !nextConnectionIds.has(connection.id)).map((connection) => connection.id);
     const timeoutSettingsChanged = !sameIds(nextConnectTimeoutIds, previousConnectTimeoutIds) || !sameIds(nextQueryTimeoutIds, previousQueryTimeoutIds);
     const layoutChanged = nextLayout !== previousLayout;
     let connectionsPersisted = false;
@@ -9178,7 +9322,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
     try {
       if (connectionsChanged) {
-        await persistConnections(nextConnections);
+        await persistConnections(nextConnections, removedConnectionIds);
         connectionsPersisted = true;
       }
       if (timeoutSettingsChanged) {
@@ -9726,14 +9870,18 @@ export const useConnectionStore = defineStore("connection", () => {
 
     if (isTauriRuntime()) {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const { readTextFile } = await import("@tauri-apps/plugin-fs");
+      const { readFile } = await import("@tauri-apps/plugin-fs");
+      const { decodeImportFileText } = await import("@/lib/common/decodeText");
       const path = await open({
         filters: source === "navicat" ? [{ name: "Navicat Connection Export", extensions: ["ncx", "xml"] }] : [{ name: "DBX JSON", extensions: ["json"] }],
         multiple: false,
       });
       if (!path) return null;
-      content = await readTextFile(path as string);
+      // Raw bytes: Navicat 17 macOS exports can be UTF-16 (#10666), which
+      // readTextFile would reject as invalid UTF-8.
+      content = decodeImportFileText(await readFile(path as string));
     } else {
+      const { decodeImportFileText } = await import("@/lib/common/decodeText");
       content = await new Promise<string>((resolve, reject) => {
         const input = document.createElement("input");
         input.type = "file";
@@ -9744,10 +9892,10 @@ export const useConnectionStore = defineStore("connection", () => {
             reject(new Error("No file selected"));
             return;
           }
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = () => reject(reader.error);
-          reader.readAsText(file);
+          file
+            .arrayBuffer()
+            .then((buffer) => resolve(decodeImportFileText(buffer)))
+            .catch(reject);
         };
         input.click();
       });
@@ -9879,6 +10027,13 @@ export const useConnectionStore = defineStore("connection", () => {
     updateLayoutAndRebuild(reconciledLayout);
   }
 
+  async function reloadFromDisk() {
+    // An external change may arrive after an in-flight reload read its snapshot.
+    // Wait for it, then read again instead of joining that stale snapshot.
+    await initFromDiskPromise;
+    await initFromDisk();
+  }
+
   async function initFromDisk() {
     // Connection normalization and timeout migration depend on persisted global
     // settings. Startup helpers may initialize connections before App.initApp().
@@ -9951,6 +10106,7 @@ export const useConnectionStore = defineStore("connection", () => {
     replacePinnedTreeNode,
     removeTreeNode,
     refreshAllTree,
+    reloadFromDisk,
     collapseAllTreeNodes,
     refreshSidebarObjectPagination,
     refreshTreeNode,

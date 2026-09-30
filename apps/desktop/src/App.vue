@@ -93,10 +93,10 @@ import { uuid } from "@/lib/common/utils";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
-import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { activeTabExternalSqlFileTarget, rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab, unassociatedExternalSqlFileTarget, type ExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, isSqlFilePath, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceKind, QueryTab, TabOutputView, TreeNode } from "@/types/database";
-import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
+import { OPEN_PLUGIN_SETTINGS, type PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { parsePluginInstallDeepLink } from "@/lib/plugins/pluginInstallDeepLink";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type ConnectionDeepLinkDraft, type ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
@@ -111,6 +111,7 @@ import {
   isExecuteSqlInNewResultTabShortcut,
   isExecuteSqlShortcut,
   isFocusSearchShortcut,
+  isFocusWhereShortcut,
   isGoToColumnShortcut,
   isModRShortcut,
   handleTabHistoryNavigationShortcut,
@@ -162,7 +163,8 @@ import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { objectBrowserTablesToAiTreeNodes } from "@/lib/ai/objectBrowserToAiTargets";
-import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import { aiTargetFromTab, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import type { AiExternalContextRequest } from "@/lib/ai/aiExternalContext";
 import { isSchemaAware, isSingleDatabase, supportsConnectionQueryActions, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { canFormatSqlForDatabaseType, formatSqlForEditing, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
@@ -184,6 +186,7 @@ import ExternalSqlFileChangeDialog from "@/components/editor/ExternalSqlFileChan
 import { resolveWindowContext } from "@/lib/app/windowContext";
 import { openDetachedTabWindow } from "@/lib/app/detachedTabWindow";
 import { OPEN_PLUGIN_AI_CONVERSATION, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
+import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostBridge";
 
 const AiAssistant = defineAsyncComponent(() => import("@/components/editor/AiAssistant.vue"));
 const PluginWorkbenchTab = defineAsyncComponent(() => import("@/components/plugins/PluginWorkbenchTab.vue"));
@@ -205,11 +208,9 @@ const QueryEditorObjectSourceDialog = defineAsyncComponent(() => import("@/compo
 
 type AiAssistantHandle = {
   openPluginConversation: (request: AiPluginConversationRequest) => void;
+  /** Single entry point for AI triggers outside the panel (#10058 R1/R3). */
+  openExternalContext: (request: AiExternalContextRequest) => void;
   triggerAction: (action: AiAction, instruction?: string) => void;
-  setPrompt: (text: string) => void;
-  addTableMention: (target: { schema?: string; table: string }, binding?: AiConversationBinding) => void;
-  /** Retarget the conversation on its own, for entries that add no mention. */
-  bindConversation: (binding: AiConversationBinding) => Promise<void>;
   clearContextReferences: () => void;
   focusSearch: () => boolean;
   /** Opens a conversation by id (used by the background-run toast, §9). */
@@ -402,6 +403,7 @@ const agentDriverUpdateCount = ref(0);
 const showHistory = ref(false);
 const showAiPanel = ref(safeLocalStorageGet("dbx-ai-panel-open") === "true");
 const isAiPanelMaximized = ref(false);
+const isHistoryPanelMaximized = ref(false);
 const isZenMode = ref(false);
 const showSqlLibraryPanel = ref(safeLocalStorageGet("dbx-sql-library-open") === "true");
 const showSqlFilePanel = ref(safeLocalStorageGet("dbx-sql-file-panel-open") === "true");
@@ -490,6 +492,20 @@ const blockingAiRunCount = computed(() => (isDesktop ? blockingDesktopAiRunsForQ
 let aiRunsQuitConfirmed = false;
 
 const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore.activeTabId));
+const pluginAiRecommendationsByTab = ref<Record<string, PluginAiRecommendationHostUpdate>>({});
+const activePluginAiRecommendations = computed(() => {
+  const tab = activeTab.value;
+  if (!tab || tab.mode !== "plugin-workbench" || !tab.pluginWorkbench) return undefined;
+  return pluginAiRecommendationsByTab.value[tab.id];
+});
+
+function updatePluginAiRecommendations(tabId: string, update: PluginAiRecommendationHostUpdate): void {
+  const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+  if (!tab?.pluginWorkbench || tab.pluginWorkbench.pluginId !== update.pluginId || tab.pluginWorkbench.contributionId !== update.contributionId) return;
+  const expectedWorkbenchId = typeof tab.pluginWorkbench.context?.workbenchId === "string" ? tab.pluginWorkbench.context.workbenchId : undefined;
+  if (expectedWorkbenchId && update.workbenchId && expectedWorkbenchId !== update.workbenchId) return;
+  pluginAiRecommendationsByTab.value = { ...pluginAiRecommendationsByTab.value, [tabId]: update };
+}
 // Plugin workbench tabs stay mounted once opened (hidden via v-show): an
 // iframe moved out of the DOM reloads from scratch, so KeepAlive/ContentArea
 // remounts flash the whole webview and drop its live session state.
@@ -943,9 +959,16 @@ function requestActiveEditorExecute(source?: "pointer" | "keyboard", tabId?: str
   void tryExecute(undefined, targetTabId ? { tabId: targetTabId } : undefined);
 }
 
-function requestActiveEditorExecuteInNewResultTab() {
-  if (contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab?.()) return;
-  void tryExecuteInNewResultTab();
+function requestActiveEditorExecuteInNewResultTab(source?: "pointer" | "keyboard", tabId?: string) {
+  const snapshot = pendingToolbarExecutionSnapshot.value;
+  pendingToolbarExecutionSnapshot.value = undefined;
+  const targetTabId = tabId ?? (source === "pointer" ? snapshot?.tabId : undefined);
+  if (source === "pointer" && snapshot && snapshot.tabId === targetTabId) {
+    void tryExecuteInNewResultTab(snapshot, { tabId: targetTabId });
+    return;
+  }
+  if (contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab?.(targetTabId)) return;
+  void tryExecuteInNewResultTab(undefined, targetTabId ? { tabId: targetTabId } : undefined);
 }
 
 const toolbarAgentDriverUpdateCount = computed(() => Math.max(agentDriverUpdateCount.value, componentUpdates.driverUpdateCount.value));
@@ -989,6 +1012,7 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   databaseRequiredSignalFor: (tabId: string) => (databaseRequiredTabId.value === tabId ? databaseRequiredSignal.value : 0),
   captureExecutionSnapshot: captureActiveEditorExecutionSnapshot,
   toolbarExecute: requestActiveEditorExecute,
+  toolbarExecuteInNewResultTab: requestActiveEditorExecuteInNewResultTab,
   cancelExecution: (tabId: string) => cancelActiveExecution(tabId),
   explain: (tabId: string) => tryExplain(undefined, { tabId }),
   formatSql: formatActiveSql,
@@ -1251,6 +1275,8 @@ function openPluginCenterPage(focus?: PluginCenterFocus | null) {
   pluginCenterTabOpen.value = true;
   activateMainContentSurface("pluginCenter");
 }
+
+provide(OPEN_PLUGIN_SETTINGS, () => openPluginCenterPage({ section: "settings" }));
 
 function closePluginCenterPage() {
   pluginCenterTabOpen.value = false;
@@ -1681,6 +1707,7 @@ function applyRightSidebarPanelState(next: RightSidebarPanelState) {
 }
 
 function setRightSidebarPanelOpen(panelId: RightSidebarPanelId, open: boolean) {
+  if ((panelId === "history" && !open) || (panelId !== "history" && open)) isHistoryPanelMaximized.value = false;
   if (panelId === "ai" && !open) {
     isAiPanelMaximized.value = false;
   } else if (open && panelId !== "ai" && isAiPanelMaximized.value) {
@@ -1733,14 +1760,53 @@ function invokeWhenAiReady(invoke: (handle: AiAssistantHandle) => void) {
   });
 }
 
-function fixWithAi(errorMessage: string) {
-  openRightSidebarPanel("ai");
-  invokeWhenAiReady((handle) => handle.triggerAction("fix", errorMessage));
+/**
+ * Namespace an editor-triggered AI request must bind to (#10058 R1).
+ *
+ * Resolved from the tab the gesture came from — not from the tab that happens to
+ * be active — so a right-click in a background SQL editor still lands on its own
+ * connection. `null` when the tab's connection is gone (a SQL tab survives its
+ * connection being deleted): the panel then degrades to an unbound chat and says
+ * so instead of reusing whatever the current conversation was bound to (R6).
+ */
+function editorAiTarget(tabId?: string): AiConversationBinding | null {
+  // An explicit tabId that no longer resolves must NOT fall back to the active
+  // tab: the gesture belongs to a closed editor, and binding it to whatever is
+  // open now would attribute the request to the wrong namespace.
+  const tab = tabId ? queryStore.tabs.find((candidate) => candidate.id === tabId) : activeTab.value;
+  return aiTargetFromTab(tab, (connectionId) => !!connectionStore.getConfig(connectionId));
 }
 
-function sendSelectionToAi(sql: string) {
+function fixWithAi(tabId: string, errorMessage: string) {
   openRightSidebarPanel("ai");
-  invokeWhenAiReady((handle) => handle.setPrompt(sql));
+  invokeWhenAiReady((handle) =>
+    handle.openExternalContext({
+      target: editorAiTarget(tabId),
+      action: "fix",
+      instruction: errorMessage,
+      unresolvedKey: "ai.externalTargetUnavailable",
+    }),
+  );
+}
+
+/**
+ * "Send to AI" from the SQL editor (#10058).
+ *
+ * The selected SQL becomes composer *context* — a removable chip — and the input
+ * box stays empty for the user's own request. It used to be pasted into the
+ * composer as prompt text, which made data look like an instruction and left it
+ * unbounded.
+ */
+function sendSelectionToAi(tabId: string, sql: string) {
+  const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+  openRightSidebarPanel("ai");
+  invokeWhenAiReady((handle) => {
+    handle.openExternalContext({
+      target: editorAiTarget(tabId),
+      selections: [{ source: "editor", label: tab?.title, content: sql }],
+      unresolvedKey: "ai.externalTargetUnavailable",
+    });
+  });
 }
 
 let addToAiRequestId = 0;
@@ -1778,17 +1844,18 @@ async function addToAi(nodesInput: TreeNode | TreeNode[]) {
 
     // The *conversation* is retargeted, not the editor: asking about a table must
     // not move the workspace's active connection or steal/create a tab (#9902).
-    // The previous connection's mentions are cleared inside applyExternalBinding().
+    // Which conversation is decided by the same rule the editor entry uses
+    // (#10058 R3): same namespace reuses the shown chat (no-op), another
+    // namespace opens a new chat bound to this one instead of rewriting it.
     const binding: AiConversationBinding = { connectionId: node.connectionId, database: target.database, schema: target.schema };
     const tableMentions = nodes.filter((entry) => entry.type === "table" && !!entry.label).map((entry) => ({ schema: entry.schema, table: entry.label }));
 
     openRightSidebarPanel("ai");
     invokeWhenAiReady((handle) => {
-      // Applied independently of the mentions: "Ask AI" on a *connection* or
-      // *database* node carries a target but adds no table mention, and it still
-      // has to retarget the conversation (#9902).
-      void handle.bindConversation(binding);
-      for (const mention of tableMentions) handle.addTableMention(mention, binding);
+      // Mentions and target travel together: "Ask AI" on a *connection* or
+      // *database* node carries a target but adds no mention, and it still has
+      // to move the chat (#9902).
+      handle.openExternalContext({ target: binding, tableMentions });
     });
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
@@ -2410,8 +2477,7 @@ async function saveActiveSqlAsLocalFile() {
   if (tab) await saveExternalSqlTabAs(tab);
 }
 
-function applyExternalSqlFileTarget(tab: QueryTab, path: string) {
-  const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+function applyExternalSqlTarget(tab: QueryTab, target: ExternalSqlFileTarget) {
   if (target.connectionId !== tab.connectionId) {
     queryStore.updateConnection(tab.id, target.connectionId, target.database);
   }
@@ -2422,6 +2488,13 @@ function applyExternalSqlFileTarget(tab: QueryTab, path: string) {
   // updateConnection/updateCatalog/updateDatabase all reset the schema, so the
   // remembered schema has to be reapplied after them.
   if (target.schema !== tab.schema) queryStore.updateSchema(tab.id, target.schema);
+}
+
+function applyExternalSqlFileTarget(tab: QueryTab, path: string) {
+  applyExternalSqlTarget(
+    tab,
+    resolveExternalSqlFileTargetForActiveTab(path, queryStore.tabs, tab.id, (connectionId) => connectionStore.getConfig(connectionId)),
+  );
 }
 
 async function openSqlFile() {
@@ -2452,6 +2525,10 @@ async function openSqlFile() {
         if (!file) return;
         try {
           queryStore.updateSql(tab.id, await readBrowserSqlFile(file, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb)));
+          applyExternalSqlTarget(
+            tab,
+            activeTabExternalSqlFileTarget(queryStore.tabs, tab.id, (connectionId) => connectionStore.getConfig(connectionId)),
+          );
         } catch (e: any) {
           toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
         }
@@ -2495,6 +2572,8 @@ async function openSqlFilePath(path: string) {
   try {
     await desktopOpenTabsRestorationBarrier?.settled;
     const snapshot = await api.readExternalSqlFileSnapshot(path, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
+    // Startup and OS-open events have no initiating editor tab. Keep new files
+    // unassociated even if persisted tab restoration has since selected one.
     const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
     queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog, target.schema);
   } catch (e: any) {
@@ -3265,7 +3344,7 @@ async function handleQuickOpenSelect(item: any) {
   if (item.type === "content_match" && item.filePath) {
     try {
       const snapshot = await api.readExternalSqlFileSnapshot(item.filePath, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
-      const target = resolveExternalSqlFileTarget(item.filePath, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+      const target = resolveExternalSqlFileTargetForActiveTab(item.filePath, queryStore.tabs, queryStore.activeTabId, (connectionId) => connectionStore.getConfig(connectionId));
       queryStore.openExternalSqlFile(target.connectionId, target.database, item.filePath, snapshot.content, snapshot.version, target.catalog, target.schema, { line: item.line ?? 1, column: item.column });
     } catch (e: any) {
       toast(
@@ -3279,7 +3358,7 @@ async function handleQuickOpenSelect(item: any) {
   if (item.type === "sql_file" && item.filePath) {
     try {
       const snapshot = await api.readExternalSqlFileSnapshot(item.filePath, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
-      const target = resolveExternalSqlFileTarget(item.filePath, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+      const target = resolveExternalSqlFileTargetForActiveTab(item.filePath, queryStore.tabs, queryStore.activeTabId, (connectionId) => connectionStore.getConfig(connectionId));
       queryStore.openExternalSqlFile(target.connectionId, target.database, item.filePath, snapshot.content, snapshot.version, target.catalog, target.schema);
     } catch (e: any) {
       toast(
@@ -3669,6 +3748,14 @@ async function handleKeydown(e: KeyboardEvent) {
 
   const shortcuts = settingsStore.editorSettings.shortcuts;
   if (showTabSwitcher.value) return;
+  if (isFocusWhereShortcut(e, shortcuts) && !showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value) {
+    const target = e.target instanceof Element ? e.target : null;
+    if (!target?.closest('[role="dialog"], [role="alertdialog"]') && contentAreaRef.value?.focusWhere()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+  }
   // Grid-scoped shortcuts normally win inside DataGrid. Keep that precedence
   // for a data tab even when focus is in a sibling input, where the grid's
   // local listener intentionally leaves native editing untouched.
@@ -3820,7 +3907,7 @@ async function handleKeydown(e: KeyboardEvent) {
   if (activeTab.value?.mode === "query" && isSendSelectionToAiShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
     e.preventDefault();
     e.stopPropagation();
-    if (selectedSql.value.trim()) sendSelectionToAi(selectedSql.value);
+    if (selectedSql.value.trim()) sendSelectionToAi(activeTab.value.id, selectedSql.value);
     return;
   }
   if (isModRShortcut(e) && refreshActivePluginWorkbench()) {
@@ -3870,6 +3957,16 @@ function onLoginSuccess() {
 async function initApp() {
   const t0 = performance.now();
   console.log("[STARTUP] initApp begin");
+  const savedSqlInitialization = Promise.all([initSavedSqlEditorPositions(), savedSqlStore.initFromStorage()])
+    .then(() => {
+      console.log(`[STARTUP]   savedSqlStore.initFromStorage: ${(performance.now() - t0).toFixed(0)}ms`);
+      return true;
+    })
+    .catch((e: any) => {
+      toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
+      return false;
+    });
+
   const restoreOpenTabs = async () => {
     await settingsStore.initEditorSettings();
     markStartupPhase("settings-ready");
@@ -3897,6 +3994,13 @@ async function initApp() {
         onOptionalStateError: (error) => console.error("[STARTUP] settingsStore.initAiConfigs failed", error),
       });
     }
+    void savedSqlInitialization
+      .then((initialized) => {
+        if (initialized) return queryStore.hydrateSavedSqlTabs();
+      })
+      .catch((e: any) => {
+        toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
+      });
     await runPendingComponentUpdatesBeforePluginReconnect({
       hasPendingComponentUpdates: () => !isDetachedWindowContext && hasPendingComponentUpdatesAfterAppRestart(),
       prepareStartup: async () => {
@@ -3915,15 +4019,6 @@ async function initApp() {
     });
 
     void promptTemplateStore.init();
-
-    void Promise.all([initSavedSqlEditorPositions(), savedSqlStore.initFromStorage()])
-      .then(() => {
-        console.log(`[STARTUP]   savedSqlStore.initFromStorage: ${(performance.now() - t0).toFixed(0)}ms`);
-        void queryStore.hydrateSavedSqlTabs();
-      })
-      .catch((e: any) => {
-        toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
-      });
 
     restoreActiveConnectionContext();
   } catch (e: any) {
@@ -4071,14 +4166,15 @@ onMounted(async () => {
       appVersion.value = v;
     })
     .catch(() => {});
-  setupTauriListeners();
+  void setupTauriListeners().then(() => {
+    void openPendingSqlFiles();
+    void openPendingDbFiles();
+    void openPendingConnectionLinks();
+    void openPendingAiConfigLinks();
+    void openPendingPluginInstallLinks();
+  });
   setupCloseActionPromptListener();
   void setupDetachedWindowEvents();
-  void openPendingSqlFiles();
-  void openPendingDbFiles();
-  void openPendingConnectionLinks();
-  void openPendingAiConfigLinks();
-  void openPendingPluginInstallLinks();
   console.log(`[STARTUP] onMounted sync done: ${(performance.now() - mountStart).toFixed(0)}ms`);
 });
 
@@ -4164,6 +4260,8 @@ onUnmounted(() => {
           @open-sql-file="dialogs.showSqlFileDialog.value = true"
           @open-schema-diff="dialogs.showSchemaDiffDialog.value = true"
           @open-data-compare="dialogs.showDataCompareDialog.value = true"
+          @open-backups="openSettings('backups')"
+          @open-mcp-settings="openSettings('mcp')"
         />
 
         <div :class="isDetachedWindowContext ? 'flex-1 flex min-h-0' : isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
@@ -4183,7 +4281,11 @@ onUnmounted(() => {
             @mousedown="rememberSidebarSearchSurface"
           />
 
-          <div v-show="!isAiPanelMaximized || isZenMode" :class="isDetachedWindowContext ? 'flex-1 min-w-0 overflow-hidden bg-background' : isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'">
+          <div
+            data-editor-content
+            v-show="(!isAiPanelMaximized && !isHistoryPanelMaximized) || isZenMode"
+            :class="isDetachedWindowContext ? 'flex-1 min-w-0 overflow-hidden bg-background' : isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'"
+          >
             <div class="h-full flex min-h-0 min-w-0 flex-col">
               <AppTabBar
                 v-if="!isDetachedWindowContext"
@@ -4323,10 +4425,10 @@ onUnmounted(() => {
                         if (tabId === queryStore.activeTabId) previewChangesAvailable = value;
                       }
                     "
-                    @fix-with-ai="(_tabId: string, message: string) => fixWithAi(message)"
+                    @fix-with-ai="(tabId: string, message: string) => fixWithAi(tabId, message)"
                     @send-selection-to-ai="
                       (tabId: string, sql: string) => {
-                        if (tabId === queryStore.activeTabId) sendSelectionToAi(sql);
+                        if (tabId === queryStore.activeTabId) sendSelectionToAi(tabId, sql);
                       }
                     "
                     @execute="(tabId: string, override?: SqlExecutionOverride) => tryExecute(override, { tabId })"
@@ -4446,6 +4548,7 @@ onUnmounted(() => {
                     :contribution-id="workbenchTab.pluginWorkbench!.contributionId"
                     :context="workbenchTab.pluginWorkbench!.context"
                     @close-tab="queryStore.closeTab(workbenchTab.id)"
+                    @recommendations="updatePluginAiRecommendations(workbenchTab.id, $event)"
                   />
                 </div>
               </div>
@@ -4455,7 +4558,7 @@ onUnmounted(() => {
 
           <div
             v-if="!isDetachedWindowContext && showAiPanel"
-            v-show="!isZenMode"
+            v-show="!isHistoryPanelMaximized && !isZenMode"
             :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate rounded-md border border-border/80 bg-background', isAiPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[240px] max-w-full']"
             :style="isAiPanelMaximized ? {} : { width: aiPanelWidth + 'px' }"
           >
@@ -4467,6 +4570,7 @@ onUnmounted(() => {
                 :tab="activeTab"
                 :connection="activeConnection"
                 :maximized="isAiPanelMaximized"
+                :plugin-recommendations="activePluginAiRecommendations"
                 @append-sql="onAiAppendSql"
                 @execute-sql="onAiExecuteSql"
                 @temp-run-sql="onAiTempRunSql"
@@ -4484,20 +4588,28 @@ onUnmounted(() => {
           <div
             v-if="!isDetachedWindowContext && showHistory"
             v-show="!isAiPanelMaximized && !isZenMode"
-            :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
-            :style="{ width: historyWidth + 'px' }"
+            :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate rounded-md border border-border/80 bg-background', isHistoryPanelMaximized ? 'min-w-0 flex-1' : 'shrink-0 max-w-full']"
+            :style="isHistoryPanelMaximized ? {} : { width: historyWidth + 'px' }"
           >
-            <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startHistoryResize" />
+            <div v-if="!isHistoryPanelMaximized" class="panel-resize-handle panel-resize-handle--left" @pointerdown="startHistoryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]" @mousedown="rememberAuxiliarySearchSurface('history')">
               <div data-history-panel class="h-full min-h-0">
-                <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="closeRightSidebarPanel('history')" />
+                <QueryHistory
+                  :maximized="isHistoryPanelMaximized"
+                  @toggle-maximize="isHistoryPanelMaximized = !isHistoryPanelMaximized"
+                  :current-connection-id="activeTab?.connectionId"
+                  :current-database="activeTab?.database"
+                  @restore="restoreHistorySql"
+                  @analyze-ai="analyzeHistoryWithAi"
+                  @close="closeRightSidebarPanel('history')"
+                />
               </div>
             </div>
           </div>
 
           <div
             v-if="!isDetachedWindowContext && showSqlLibraryPanel"
-            v-show="!isAiPanelMaximized && !isZenMode"
+            v-show="!isAiPanelMaximized && !isHistoryPanelMaximized && !isZenMode"
             :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
             :style="{ width: sqlLibraryWidth + 'px' }"
           >
@@ -4511,7 +4623,7 @@ onUnmounted(() => {
 
           <div
             v-if="!isDetachedWindowContext && showSqlFilePanel"
-            v-show="!isAiPanelMaximized && !isZenMode"
+            v-show="!isAiPanelMaximized && !isHistoryPanelMaximized && !isZenMode"
             :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
             :style="{ width: sqlFilePanelWidth + 'px' }"
           >

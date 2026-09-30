@@ -49,6 +49,8 @@ export interface TabResultSnapshot {
   resultPageSql?: string;
   resultPageLimit?: number;
   resultPageOffset?: number;
+  resultExecutedPageLimit?: number;
+  resultExecutedPageOffset?: number;
   resultCountSql?: string;
   resultTotalRowCount?: number;
   cachedAt: number;
@@ -67,6 +69,7 @@ interface ColumnarQueryResult {
   rowCount: number;
   mongo_documents?: unknown[];
   mongo_copy_documents?: unknown[];
+  redis_console_output?: string;
   affected_rows: number;
   execution_time_ms: number;
   server_execute_time_us?: number;
@@ -361,6 +364,7 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     rows: result.rows.map((row) => [...row]),
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
+    redis_console_output: result.redis_console_output,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
     server_execute_time_us: result.server_execute_time_us,
@@ -424,6 +428,7 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     rowCount,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
+    redis_console_output: result.redis_console_output,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
     server_execute_time_us: result.server_execute_time_us,
@@ -459,6 +464,7 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     rows,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
+    redis_console_output: result.redis_console_output,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
     server_execute_time_us: result.server_execute_time_us,
@@ -807,6 +813,8 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     resultPageSql: tab.resultPageSql,
     resultPageLimit: tab.resultPageLimit,
     resultPageOffset: tab.resultPageOffset,
+    resultExecutedPageLimit: tab.resultExecutedPageLimit,
+    resultExecutedPageOffset: tab.resultExecutedPageOffset,
     resultCountSql: tab.resultCountSql,
     resultTotalRowCount: tab.resultTotalRowCount,
     cachedAt: Date.now(),

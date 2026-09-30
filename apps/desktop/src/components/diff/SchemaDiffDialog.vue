@@ -121,7 +121,7 @@ watch([sourceDbType, targetDbType], ([src, tgt]) => {
 });
 const optionTree = computed(() => {
   const targetConfig = store.getConfig(targetConnectionId.value);
-  const dbType = targetConfig?.db_type || "postgres";
+  const dbType = schemaDiffEngineDatabaseType(targetConfig) || targetConfig?.db_type || "postgres";
   return getSchemaDiffOptionsForDbType(dbType);
 });
 
@@ -1283,7 +1283,7 @@ const targetConnectionInfo = computed(() => {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent :class="['flex flex-col overflow-hidden', isMaximized ? 'min-w-0' : 'min-w-[800px] resize']" :portal-class="isMaximized ? 'p-0' : undefined" :style="dialogStyle" @interact-outside.prevent @escape-key-down="handleDialogEscape">
+    <DialogContent :class="['flex flex-col overflow-hidden dbx-schema-diff-dialog', isMaximized ? 'dbx-dialog-maximized min-w-0' : 'min-w-[800px] resize']" :portal-class="isMaximized ? 'p-0' : undefined" :style="dialogStyle" @interact-outside.prevent @escape-key-down="handleDialogEscape">
       <Button variant="ghost" size="icon-sm" class="absolute top-2 right-10 z-10" @click="toggleMaximize">
         <Maximize2 v-if="!isMaximized" class="w-4 h-4" />
         <Minimize2 v-else class="w-4 h-4" />
@@ -1647,12 +1647,14 @@ const targetConnectionInfo = computed(() => {
 
       <!-- Options Panel Overlay -->
       <div v-if="showOptionsPanel" class="absolute inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center" @click.self="showOptionsPanel = false">
-        <div class="bg-card border rounded-lg shadow-lg w-[760px] max-w-[calc(100vw-2rem)] max-h-[80vh] overflow-auto p-4">
-          <div class="flex items-center justify-between mb-4">
+        <div class="flex h-[calc(100%-2rem)] max-h-[680px] w-[900px] max-w-[calc(100%-2rem)] flex-col overflow-hidden rounded-lg border bg-card shadow-lg">
+          <div class="flex shrink-0 items-center justify-between border-b px-4 py-3">
             <h3 class="text-sm font-medium">{{ t("schemaDiff.optionsTitle") }}</h3>
             <Button variant="ghost" size="sm" @click="showOptionsPanel = false" :aria-label="t('common.close')">✕</Button>
           </div>
-          <SchemaDiffOptionsPanel :options="schemaDiffPanelOptions" :option-tree="optionTree" @update:options="handleOptionsUpdate" @close="showOptionsPanel = false" />
+          <div class="min-h-0 flex-1 p-4">
+            <SchemaDiffOptionsPanel :options="schemaDiffPanelOptions" :option-tree="optionTree" @update:options="handleOptionsUpdate" @close="showOptionsPanel = false" />
+          </div>
         </div>
       </div>
 
