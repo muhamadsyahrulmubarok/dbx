@@ -3,7 +3,6 @@ import { defineAsyncComponent, onMounted, onUnmounted, ref, shallowRef, watch } 
 import { useI18n } from "vue-i18n";
 import StartupLoading from "@/components/layout/StartupLoading.vue";
 import { useMigrationStore } from "@/stores/migrationStore";
-import { appLockStatus, appLockVerify, requestAppClose } from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { webPath } from "@/lib/common/webPath";
 import { loadSavedLocale } from "@/i18n";
@@ -31,9 +30,6 @@ const { t } = useI18n();
 const migration = useMigrationStore();
 const { blocking } = migration;
 const checkingAuth = ref(true);
-const appLocked = ref(false);
-const appLockUnavailable = ref(false);
-const appLockQuitError = ref("");
 const loginRequired = ref(false);
 const setupRequired = ref(false);
 const authFailed = ref(false);
@@ -62,28 +58,6 @@ async function initializeLocale() {
     checkingLocale.value = false;
   }
 }
-async function resolveAppLock(signal: AbortSignal): Promise<boolean> {
-  if (!isTauriRuntime()) return true;
-  const status = await appLockStatus();
-  if (signal.aborted) return false;
-  if (!status.locked) {
-    appLocked.value = false;
-    appLockUnavailable.value = false;
-    return true;
-  }
-  appLocked.value = true;
-  const outcome = await appLockVerify();
-  if (signal.aborted) return false;
-  if (outcome !== "verified") {
-    appLockUnavailable.value = outcome === "unavailable";
-    return false;
-  }
-  const refreshed = await appLockStatus();
-  if (signal.aborted) return false;
-  appLocked.value = refreshed.locked;
-  appLockUnavailable.value = false;
-  return !refreshed.locked;
-}
 async function initialize() {
   authRequest?.abort();
   const request = new AbortController();
@@ -91,8 +65,6 @@ async function initialize() {
   checkingAuth.value = true;
   authFailed.value = false;
   try {
-    const unlocked = await resolveAppLock(request.signal);
-    if (request.signal.aborted || !unlocked) return;
     if (!isTauriRuntime()) {
       const result = await checkStartupAuthentication(request.signal);
       if (request.signal.aborted) return;
@@ -116,16 +88,6 @@ async function authenticated() {
   history.replaceState(null, "", webPath("/"));
   await initialize();
 }
-async function retryUnlock() {
-  await initialize();
-}
-async function quitFromLock() {
-  try {
-    await requestAppClose();
-  } catch (error) {
-    appLockQuitError.value = error instanceof Error ? error.message : String(error);
-  }
-}
 onMounted(() => {
   void initializeLocale();
   void initialize();
@@ -135,13 +97,6 @@ onUnmounted(() => authRequest?.abort());
 <template>
   <StartupLoading v-if="checkingLocale || localeFailed || checkingAuth || authFailed" :label="authFailed ? t('migration.authFailed') : !checkingLocale && !localeFailed ? t('migration.checking') : undefined" :error="localeFailed || authFailed" :retry="localeFailed ? initializeLocale : initialize" />
   <LoginPage v-else-if="loginRequired" :setup-mode="setupRequired" @authenticated="authenticated" />
-  <div v-else-if="appLocked" data-app-lock>
-    <p>{{ t("appLock.title") }}</p>
-    <p v-if="appLockUnavailable">{{ t("appLock.unavailable") }}</p>
-    <p v-if="appLockQuitError" data-app-lock-quit-error>{{ appLockQuitError }}</p>
-    <button type="button" data-app-lock-retry @click="retryUnlock">{{ t("appLock.retry") }}</button>
-    <button type="button" data-app-lock-quit @click="quitFromLock">{{ t("appLock.quit") }}</button>
-  </div>
   <SecurityMigrationWizard v-else-if="blocking" :store="migration" />
   <App v-else :startup-authentication="startupAuthentication" />
 </template>
